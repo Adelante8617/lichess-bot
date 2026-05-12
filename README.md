@@ -1,9 +1,11 @@
 # Lichess LLM Chess Bot
 
-一个挂在 [Lichess](https://lichess.org) BOT 账号下、**完全由大语言模型决策**的国际象棋机器人。
-对局中不调用任何象棋引擎（Stockfish 只在赛后复盘时出现），让 LLM 自己看盘、算变、下棋；
-赛后用 Stockfish 找出 blunder，逼模型自我反思，把经验写进 RAG 记忆库，下一局自动召回。
+一个挂在 [Lichess](https://lichess.org) BOT 账号下、**完全由大语言模型决策**的国际象棋智能体。
+对局中不调用任何象棋引擎（Stockfish 只在赛后复盘时出现），让 LLM 自己阅读局面、计算主要变化、执行下棋动作；
+赛后用 Stockfish 找出 blunder，引导模型自我反思，把经验写进 RAG 记忆库，后续对局中自动召回。
 支持从 Lichess 聊天框读取人类教练的实时评价（仅赛后总结，不用于实时作弊）。
+
+![框架图](./framework.png)
 
 ---
 
