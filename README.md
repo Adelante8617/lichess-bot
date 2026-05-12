@@ -1,11 +1,9 @@
-# Lichess LLM Chess Bot · 自进化版
+# Lichess LLM Chess Bot
 
 一个挂在 [Lichess](https://lichess.org) BOT 账号下、**完全由大语言模型决策**的国际象棋机器人。
 对局中不调用任何象棋引擎（Stockfish 只在赛后复盘时出现），让 LLM 自己看盘、算变、下棋；
 赛后用 Stockfish 找出 blunder，逼模型自我反思，把经验写进 RAG 记忆库，下一局自动召回。
 支持从 Lichess 聊天框读取人类教练的实时评价（仅赛后总结，不用于实时作弊）。
-
-> 配套代码：`main.py` 一个文件跑通全流程；`rag.py` 纯 numpy 向量库；`logger_setup.py` 日志重定向。
 
 ---
 
@@ -41,7 +39,7 @@ Lichess 事件流 (berserk)
     │                                    ├─ 3 次非法重试
     │                                    └─ 落子成功后把 board_summary 写入 experience_rag
     │
-    ├── chatLine ─────────────► 入 chat_messages（附当时 FEN/ply/last_move）
+    ├── chatLine ─────────────► 写入 chat_messages（附当时 FEN/ply/last_move）
     │
     └── 对局结束 ─────────────► post_game_review   (自我反思 + 可选 Stockfish)
                                   blunder_deep_review (强制 Stockfish 扫 blunder)
@@ -128,7 +126,7 @@ python main.py
 
 - `MODEL`：默认 `"gpt-4.1"`
 - `EMBED_MODEL`：默认 `"text-embedding-3-small"`
-- LLM `base_url`：默认 `https://api.qingyuntop.top/v1`
+- LLM `base_url`：填写你的Base URL
 
 ---
 
@@ -167,7 +165,6 @@ Prompt 顶部显式声明「只能走自己颜色的子，盘面 W* = 白，B* =
 - 单次采样，没有 best-of-N 投票，中残局一次直觉错就落子。
 - 经验库无去重 / 淘汰策略，长期运行后向量检索噪音会变大。
 - 非法走法 fallback 是 `legal_moves[0]`，中残局往往导致送分——建议改进。
-- 聊天只读，不回复（设计如此）。
 
 ---
 
@@ -194,4 +191,4 @@ lichess-bot/
 
 ## License
 
-MIT，详见 [`LICENSE`](./LICENSE)。
+[`MIT LICENSE`](./LICENSE)。
