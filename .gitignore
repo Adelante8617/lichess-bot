@@ -1,0 +1,30 @@
+# === Secrets ===
+.env
+.env.*
+!.env.example
+
+# === Generated / Local data ===
+data/
+games/
+logs/
+
+# === Bundled binaries (platform-specific, large) ===
+stockfish/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.Python
+build/
+dist/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

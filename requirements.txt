@@ -1,0 +1,5 @@
+python-chess>=1.999
+berserk>=0.13.2
+openai>=1.40.0
+python-dotenv>=1.0.0
+numpy>=1.24
