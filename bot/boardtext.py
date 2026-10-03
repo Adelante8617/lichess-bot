@@ -105,6 +105,8 @@ def board_meta(board: chess.Board) -> str:
     """当前局面的非棋子信息：轮到谁、是否被将军、易位权、吃过路兵、50 步计数。"""
     lines = [f"轮到: {COLOR_ZH[board.turn]}"]
     lines.append("你正被将军，必须应将" if board.is_check() else "当前未被将军")
+    lines.append(f"子力分值（兵1 马象3 车5 后9）：白方 {material_points(board, chess.WHITE)}，"
+                 f"黑方 {material_points(board, chess.BLACK)}")
     for color in (chess.WHITE, chess.BLACK):
         rights = []
         if board.has_kingside_castling_rights(color):
@@ -136,11 +138,17 @@ def game_phase(board: chess.Board) -> str:
     return "残局" if pieces <= 26 else "中局"
 
 
+PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
+
+
+def material_points(board: chess.Board, color: bool) -> int:
+    """按常规分值（兵1 马象3 车5 后9）数出的子力总分。"""
+    return sum(v * len(board.pieces(pt, color)) for pt, v in PIECE_VALUES.items())
+
+
 def material_lead(board: chess.Board) -> int:
     """轮到走棋一方的子力分差（兵1 马象3 车5 后9），正数表示我方领先。"""
-    values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
-    return sum(v * (len(board.pieces(pt, board.turn)) - len(board.pieces(pt, not board.turn)))
-               for pt, v in values.items())
+    return material_points(board, board.turn) - material_points(board, not board.turn)
 
 
 def uci_to_san(fen: str, uci: str) -> str:

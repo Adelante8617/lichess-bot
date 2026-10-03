@@ -71,6 +71,7 @@ def llm_call(messages: list, tools: list | None = None, levels: list[str] | None
     levels = levels or THINK_LADDER[:1]
     max_tokens = max_tokens or LLM_MAX_TOKENS
     msgs, use_tools = messages, tools
+    truncated: list[str] = []  # 被截断的思考，并入最终消息的 reasoning，日志和观战页才看得到
     for i, level in enumerate(levels):
         kw = dict(model=MODEL, messages=msgs, temperature=LLM_TEMPERATURE,
                   max_tokens=max_tokens, **effort_kwargs(level))
@@ -80,12 +81,13 @@ def llm_call(messages: list, tools: list | None = None, levels: list[str] | None
         choice = client().chat.completions.create(**kw).choices[0]
         msg = choice.message
         if choice.finish_reason != "length":
-            return msg, level
+            return _merge_truncated(msg, truncated), level
         print(f"[WARN] 模型输出达到 max_tokens={max_tokens} 被截断（effort={level}）")
         if (msg.content or "").strip() or msg.tool_calls or i == len(levels) - 1:
-            return msg, level
+            return _merge_truncated(msg, truncated), level
         # 正文为空：带回思考末尾，降一档、不给工具，直接要最终 JSON
         reasoning = reasoning_of(msg)
+        truncated.append(f"[effort={level} 的思考，被截断]\n{reasoning}")
         tail = reasoning[-TRUNCATE_REASONING_TAIL:] if TRUNCATE_REASONING_TAIL > 0 else ""
         note = (f"你刚才的思考过长被截断，没有给出最终答案。以下是你思考的最后部分：\n{tail}\n\n"
                 if tail else "你刚才的思考过长被截断，没有给出最终答案。\n")
@@ -95,6 +97,17 @@ def llm_call(messages: list, tools: list | None = None, levels: list[str] | None
         print(f"[SALVAGE] 思考被截断（{len(reasoning)} 字），降档 {level} -> {levels[i + 1]} 直接要结论")
         live.stage(f"思考过长被截断，降档到 {levels[i + 1]}")
     return msg, level
+
+
+def _merge_truncated(msg, truncated: list[str]):
+    """把之前被截断的思考拼到最终消息的 reasoning 前面。"""
+    if truncated:
+        merged = "\n\n".join(truncated + [f"[降档后的思考]\n{reasoning_of(msg)}"])
+        try:
+            msg.reasoning_content = merged
+        except (AttributeError, ValueError):
+            pass
+    return msg
 
 
 def reasoning_of(msg) -> str:
