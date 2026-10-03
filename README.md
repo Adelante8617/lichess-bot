@@ -12,9 +12,10 @@
 ## 功能一览
 
 - **LLM 直接下棋**：每一步由 `.env` 里配置的模型（任意 OpenAI 兼容接口）决策，**对局阶段禁用 Stockfish**。默认开启模型思考，单次回复上限 8192 token，temperature 0.3。
-- **结构化思考协议**：模型先判断局面复杂度（simple / medium / complex），再按复杂度决定思考投入，避免无脑长思考；输出固定 JSON，字段顺序即决策顺序：复杂度 → 局面观察 → 候选 → think → PV → move。
+- **战略优先的思考协议**：像强棋手一样"先定方针，再算少数几步"，而不是把合法着法逐个试一遍：紧急情况（威胁 / 立即机会）→ 战略方针（3-5 步的计划，依据子力、王安全、兵形、子力活跃度）→ 最多 3 个候选（只能来自紧急情况或方针）→ 针对性计算 → 决定。复杂度（simple / medium / complex）决定思考投入。输出固定 JSON，字段顺序即决策顺序。
+- **跨步方针**：模型每步输出的 `strategy` 会带到下一步的 prompt（`PLAN_MEMORY=1`，默认开），局面没有本质变化就沿用并推进，出现新情况才修改。
 - **行棋原则 + 落子前安全检查**：prompt 要求吃子前确认对方能否吃回、不做未经验证的弃子，并在落子前站在对方角度检查落点、失去保护的子和对方最强回应。
-- **落子前自检轮**：选出着法后，再单独让模型看一眼走完后的盘面，找出对方最强应着；会白丢子就改选（最多 2 轮，`SELF_CHECK_ROUNDS`）。只让模型自己复查，程序不做任何局面判断。
+- **落子前自检轮**：选出着法后，再单独让模型看一眼走完后的盘面，找出对方最强应着；会白丢子就改选（最多 2 轮，`SELF_CHECK_ROUNDS`）。前几轮否决过的着法连同理由会带进后续轮次，不允许改回（避免 A → B → A 的来回摇摆）；最后一轮改出的着法会标注"未经复查"。只让模型自己复查，程序不做任何局面判断。
 - **面向人的棋盘表示**：不给 FEN。prompt 里是 ASCII 盘面 + 双方按子种分组的中文子力清单（`王 e1；后 d1；车 a1, h1 …`）+ 局面元信息（轮到谁、是否被将军、易位权、吃过路兵、50 步计数）+ 全部着法历史（SAN）。
 - **SAN 记谱**：合法着法列表、模型输出的 candidates/pv/move 全部用 SAN（内部再转 UCI 落子，同时兼容模型误写 UCI / `0-0`）。合法着法列表保留将军符号 `+`；将死的 `#` 也显示为 `+`，只提示"会将军"，不暴露"一步杀"。
 - **对方上一步描述**：明确告诉模型对方刚走了什么（SAN、子种、起止格、是否吃子/升变/易位）。
@@ -37,9 +38,9 @@
 Lichess 事件流 (berserk)
         │
         ▼
-  主循环 (main.py)
+  主循环 (bot/lichess.py)
     ├── gameFull / gameState ─► 生成 board → 轮到我方时
-    │                              └─ get_llm_move(board, prev_board, opp_last_move)
+    │                              └─ get_llm_move(board, prev_board, opp_last_move)   # bot/player.py
     │                                    ├─ PLAY_TOOLS: search_experience / search_opening_book
     │                                    ├─ 3 次非法重试
     │                                    └─ 落子成功后把 board_summary 写入 experience_rag
@@ -135,6 +136,10 @@ python main.py
 | `LLM_MAX_TOKENS` / `LLM_TEMPERATURE` | `8192` / `0.3` | 下棋阶段单次回复上限（含思考）与采样温度 |
 | `AUTO_RECALL_K` | `3` | 每步自动召回的经验条数，`0` 关闭 |
 | `SELF_CHECK_ROUNDS` | `2` | 落子前自检最多轮数，`0` 关闭 |
+| `PLAN_MEMORY` | `1` | 把上一步的战略方针 `strategy` 带给下一步，`0` 每步重新制定 |
+| `BOARD_RELATIONS` | `0` | `1` 在 prompt 中附上程序按规则列出的子力关系（每个子攻击/保护了谁、被谁攻击/保护，直线、王周边、兵形），只给事实不做判断 |
+| `ANALYSIS_BOARD` | `0` | `1` 提供 `play_line` 分析棋盘工具：模型给一串着法，程序按规则摆出并返回终点局面，不评估 |
+| `TOOL_ROUNDS` | `3`（开 `ANALYSIS_BOARD` 时 `10`） | 单步内最多几轮工具往返 |
 | `EMBED_API_KEY` | — | **必填**。Embedding（RAG）key（兼容旧的 `OPENAI_API_KEY`） |
 | `EMBED_BACKEND` | `api` | `api` 走 OpenAI 兼容接口；`local` 进程内跑本地模型（离线） |
 | `EMBED_BASE_URL` / `EMBED_MODEL` | qingyuntop / `text-embedding-3-small` | `api` 后端的接口与模型（可指向本地 Ollama 的 `/v1`） |
@@ -173,12 +178,16 @@ python local_play.py        # 另开一个终端开一局
 
 ### SYSTEM_PROMPT
 
+所有下棋阶段的提示词都在 `bot/prompts.py`。思考顺序：紧急情况 → 战略方针 → 候选 → 针对性计算 → 决定。
+明确要求：信任程序给的盘面 / 合法着法，不要重抄盘面；不要扫描合法着法列表找候选；一个变化算到平静就停。
+
 严格 JSON 输出，模型每步必须给全下列字段：
 
-- `complexity` · `complexity_reason`：先判断复杂度，决定思考投入
-- `opp_intent` · `my_attacked` · `opp_attacked` · `my_hanging` · `opp_hanging`
-- `check_chance` · `capture_chance` · `threats` · `tactics`
-- `candidates[]`：候选（simple 1-2 个 / medium 2-3 个 / complex 3-5 个），每项含 `move/pros/cons`
+- `complexity` · `complexity_reason`：复杂度，决定思考投入
+- `opp_intent`：对方上一步的意图
+- `urgent`：直接威胁与立即机会，没有写"无"
+- `strategy`：接下来 3-5 步的战略方针（≤60 字）
+- `candidates[]`：最多 3 个候选，每项含 `move/purpose/pros/cons`，`purpose` 为应对威胁 / 战术机会 / 推进方针
 - `think`：推理总结（simple ≤80 字 / medium ≤200 字 / complex ≤400 字），含安全检查结论
 - `pv[]`：由 think 推出的主变 SAN 列表，`move` 必须 `== pv[0]`
 - `board_summary`：≤80 字局面骨架（用于以后向量检索）
@@ -194,6 +203,8 @@ Prompt 顶部显式声明「只能走自己颜色的子，盘面 W* = 白，B* =
 - 对局至今的全部着法（SAN）
 - 我方 / 对方子力清单（中文全称 + 格子）
 - 局面元信息（被将军、易位权、吃过路兵、50 步计数）
+- 你上一步定下的战略方针（`PLAN_MEMORY=1`）
+- 子力关系（`BOARD_RELATIONS=1`）
 - 经验库自动召回的教训（仅供参考）
 - 合法走法（SAN，带 + 表示将军）
 
@@ -202,7 +213,7 @@ Prompt 顶部显式声明「只能走自己颜色的子，盘面 W* = 白，B* =
 ## 已知限制 / 后续可改进
 
 - LLM 在**中残局精确计算**上弱，开局靠模式识别，越到残局越容易丢子。
-- 每一步都开新 messages，只通过 SAN 走法历史了解之前的对局，看不到自己上一步的思考。
+- 每一步都开新 messages，跨步只保留上一步的战略方针（`PLAN_MEMORY`），看不到上一步的完整思考。
 - 单次采样，没有 best-of-N 投票，中残局一次直觉错就落子。
 - 经验库无去重 / 淘汰策略，长期运行后向量检索噪音会变大。
 
@@ -212,11 +223,24 @@ Prompt 顶部显式声明「只能走自己颜色的子，盘面 W* = 白，B* =
 
 ```
 lichess-bot/
-├── main.py                 # 主程序：事件循环、LLM 决策、复盘
-├── rag.py                  # 极简 RAG（numpy 余弦）
-├── logger_setup.py         # 日志 + stdout/stderr 重定向
+├── main.py                 # 入口：python main.py 连接 Lichess
+├── bot/
+│   ├── config.py           # 全部环境变量配置
+│   ├── prompts.py          # 下棋阶段的全部提示词（系统提示、局面描述、复杂度判断、自检）
+│   ├── player.py           # 单步决策：复杂度分流 → LLM 选着 → 自检 → 非法重试 / 保底
+│   ├── llm.py              # LLM 客户端、思考档位阶梯、截断补救
+│   ├── boardtext.py        # 盘面 / 子力 / SAN / PGN 的文字表示
+│   ├── board_view.py       # 子力关系与 play_line 分析棋盘
+│   ├── tools.py            # 模型可调用的工具
+│   ├── memory.py · rag.py  # 开局库 / 经验库（numpy 余弦）与自动召回
+│   ├── engine.py           # Stockfish（仅赛后复盘）
+│   ├── review.py           # 赛后复盘、blunder 深挖、聊天总结、快照验证
+│   ├── lichess.py          # Lichess 事件循环
+│   ├── live.py             # 实时状态输出（live/state.json）
+│   └── logger_setup.py     # 日志 + stdout/stderr 重定向
+├── tests/                  # 离线测试（假 LLM，不联网）：python -m unittest discover -s tests
 ├── local_play.py           # 本地对局（默认对手随机走子；也可 Stockfish / 人类 / 自对弈）
-├── live.py                 # 实时状态输出（live/state.json）
+├── laya_play.py            # 用 Laya 分类模型下棋的本地对局（与 LLM 无关）
 ├── viewer.py + web/        # 观战页面
 ├── reembed.py              # 换 embedding 后重建向量
 ├── upgrade-to-bot.py       # 把普通账号升级为 BOT
