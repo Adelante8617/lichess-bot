@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM 国际象棋 · 对局观战</title>
+<style>
+  :root {
+    --bg: #f4f1ea; --panel: #fffdf8; --ink: #2a2622; --muted: #857d72; --line: #e2dccf;
+    --light: #efd9b5; --dark: #b58863; --hl: rgba(255, 214, 0, .5);
+    --ok: #2f7d4f; --warn: #b4600f; --bad: #b3261e; --accent: #2b5fa8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1d1b18; --panel: #26231f; --ink: #ece6da; --muted: #9a9284; --line: #38342e;
+            --ok: #62c48a; --warn: #e0a05a; --bad: #ef7b73; --accent: #7fb0f0; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.55 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; gap: 14px; padding: 12px 20px;
+           border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  .meta { color: var(--muted); }
+  .badge { padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600;
+           background: var(--line); }
+  .badge.thinking { background: #fde9c8; color: #7a4a06; }
+  .badge.waiting_opponent { background: #dbe8fa; color: #1d4a86; }
+  .badge.reviewing { background: #e6dcf6; color: #4b2f86; }
+  .badge.finished { background: #d6efdf; color: #1d6a3e; }
+  main { display: grid; grid-template-columns: minmax(320px, 560px) 1fr; gap: 20px;
+         padding: 20px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; letter-spacing: .04em; }
+  .card h2:not(:first-child) { margin-top: 14px; }
+
+  .boardwrap { position: relative; }
+  /* minmax(0,1fr)：轨道不被内容撑开，8×8 严格等分；否则有棋子的格子会把列/行撑宽 */
+  #board { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr));
+           grid-template-rows: repeat(8, minmax(0, 1fr)); aspect-ratio: 1; width: 100%;
+           container-type: inline-size;
+           border: 2px solid var(--dark); border-radius: 4px; overflow: hidden; user-select: none; }
+  .sq { position: relative; display: flex; align-items: center; justify-content: center;
+        min-width: 0; min-height: 0; overflow: hidden; line-height: 1;
+        font-size: min(6.4vw, 46px); font-size: 9.5cqw; }   /* cqw：随棋盘宽度缩放 */
+  .sq.l { background: var(--light); } .sq.d { background: var(--dark); }
+  .sq.hl::after { content: ""; position: absolute; inset: 0; background: var(--hl); }
+  .sq .p { position: relative; z-index: 1; }
+  .p.w { color: #fff; text-shadow: 0 0 2px #000, 0 0 2px #000, 0 0 1px #000; }
+  .p.b { color: #111; text-shadow: 0 0 1px rgba(255,255,255,.5); }
+  .co { position: absolute; font-size: 10px; font-weight: 700; opacity: .75; z-index: 2; }
+  .co.f { right: 3px; bottom: 1px; } .co.r { left: 3px; top: 1px; }
+  .sq.l .co { color: var(--dark); } .sq.d .co { color: var(--light); }
+
+  .controls { display: flex; gap: 6px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
+           padding: 4px 12px; cursor: pointer; font-size: 14px; }
+  button:hover { border-color: var(--accent); }
+  label { color: var(--muted); margin-left: auto; cursor: pointer; }
+
+  .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  #moves { display: grid; grid-template-columns: 34px 110px 110px; justify-content: start; gap: 2px 6px;
+           max-height: 190px; overflow: auto; }
+  #moves .n { color: var(--muted); text-align: right; }
+  #moves .m { padding: 0 8px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+  #moves .m:hover { background: var(--line); }
+  #moves .m.mine { font-weight: 600; }
+  #moves .m.sel { background: var(--accent); color: #fff; }
+
+  .banner { padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; font-weight: 600; }
+  .banner.bad { background: #fbe4e2; color: var(--bad); }
+  .banner.warn { background: #fdf0dc; color: var(--warn); }
+  .banner.info { background: #e3edfb; color: #1d4a86; }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 4px 10px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; word-break: break-word; }
+  .think { white-space: pre-wrap; background: var(--bg); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.mv { font-weight: 700; white-space: nowrap; }
+  .pv { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pv span { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 1px 8px; }
+  details { margin: 4px 0; } summary { cursor: pointer; color: var(--accent); }
+  pre { white-space: pre-wrap; margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+  .cx { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; font-weight: 700; margin-left: 8px; }
+  .cx.simple { background: #d6efdf; color: #1d6a3e; }
+  .cx.medium { background: #fdf0dc; color: #8a5208; }
+  .cx.complex { background: #fbe4e2; color: #9b2019; }
+  .check { border-left: 3px solid var(--line); padding: 4px 0 4px 10px; margin: 6px 0; }
+  .check.change { border-left-color: var(--warn); }
+  .check.keep { border-left-color: var(--ok); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: currentColor;
+         margin-right: 6px; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>♟ LLM 国际象棋 · 对局观战</h1>
+  <span id="status" class="badge">等待中</span>
+  <span id="meta" class="meta"></span>
+</header>
+<main>
+  <section>
+    <div class="boardwrap card"><div id="board"></div>
+      <div class="controls">
+        <button id="first" title="开局 (Home)">⏮</button>
+        <button id="prev" title="上一步 (←)">◀</button>
+        <button id="next" title="下一步 (→)">▶</button>
+        <button id="last" title="最新 (End)">⏭</button>
+        <span id="pos" class="meta"></span>
+        <label><input type="checkbox" id="follow" checked> 自动跟随最新</label>
+      </div>
+    </div>
+  </section>
+  <section class="side">
+    <div class="card"><h2>着法</h2><div id="moves"></div></div>
+    <div class="card" id="detail"><div class="empty">暂无对局，等待游戏进程启动…<br>
+      <small>运行 python local_play.py 开一局</small></div></div>
+  </section>
+</main>
+
+<script>
+const PIECES = {k:'♚', q:'♛', r:'♜', b:'♝', n:'♞', p:'♟'};
+const OBS_LABELS = {
+  my_attacked: '我方被攻击', opp_attacked: '对方被攻击', my_hanging: '我方悬子', opp_hanging: '对方悬子',
+  check_chance: '将军机会', capture_chance: '吃子机会', threats: '对方威胁', tactics: '战术机会',
+  board_summary: '局面摘要', plan: '长期计划'
+};
+const STATUS = {idle:'等待中', thinking:'模型思考中', waiting_opponent:'等待对手', reviewing:'赛后复盘中', finished:'已结束'};
+
+let S = null;          // 最新状态
+const openDetails = new Set();   // 用户展开过的折叠块，重绘时保持展开
+let sel = 0;           // 当前查看的位置：走了 sel 步之后的局面
+let updated = -1;
+
+const $ = id => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls;
+                                 if (text !== undefined) e.textContent = text; return e; };
+
+function isMine(ply) { return (ply % 2 === 1) === (S.my_color === '白'); }
+
+function renderBoard() {
+  const b = $('board'); b.replaceChildren();
+  const fen = S.fens[sel] || S.fens[0];
+  const grid = [];
+  fen.split(' ')[0].split('/').forEach(row => {
+    const r = [];
+    for (const ch of row) { if (/\d/.test(ch)) for (let i = 0; i < +ch; i++) r.push(''); else r.push(ch); }
+    grid.push(r);
+  });
+  const flip = S.my_color === '黑';
+  const last = sel > 0 ? S.moves_uci[sel - 1] : '';
+  const hl = new Set(last ? [last.slice(0, 2), last.slice(2, 4)] : []);
+  for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) {
+    const rank = flip ? i : 7 - i, file = flip ? 7 - j : j;
+    const name = 'abcdefgh'[file] + (rank + 1);
+    const piece = grid[7 - rank][file];
+    const sq = el('div', 'sq ' + ((rank + file) % 2 === 0 ? 'd' : 'l') + (hl.has(name) ? ' hl' : ''));
+    if (piece) sq.append(el('span', 'p ' + (piece === piece.toUpperCase() ? 'w' : 'b'), PIECES[piece.toLowerCase()] + '︎'));
+    if (i === 7) sq.append(el('span', 'co f', 'abcdefgh'[file]));   // 底边标列
+    if (j === 0) sq.append(el('span', 'co r', String(rank + 1)));   // 左边标行
+    b.append(sq);
+  }
+}
+
+function renderMoves() {
+  const box = $('moves'); box.replaceChildren();
+  const n = S.moves_san.length;
+  for (let k = 0; k < n; k += 2) {
+    box.append(el('div', 'n', (k / 2 + 1) + '.'));
+    for (const p of [k + 1, k + 2]) {
+      if (p > n) { box.append(el('div')); continue; }
+      const m = el('div', 'm' + (isMine(p) ? ' mine' : '') + (p === sel ? ' sel' : ''), S.moves_san[p - 1]);
+      m.onclick = () => { sel = p; $('follow').checked = (p === n); render(); };
+      box.append(m);
+    }
+  }
+  const s = box.querySelector('.sel'); if (s) s.scrollIntoView({block: 'nearest'});
+}
+
+function det(key, summary, body, defaultOpen = false) {
+  const de = el('details'); de.open = openDetails.has(key) || (defaultOpen && !openDetails.has('!' + key));
+  de.append(el('summary', '', summary)); de.append(body);
+  de.addEventListener('toggle', () => {
+    if (de.open) { openDetails.add(key); openDetails.delete('!' + key); }
+    else { openDetails.delete(key); openDetails.add('!' + key); }
+  });
+  return de;
+}
+
+function kv(dl, k, v) { if (v === undefined || v === '' || (Array.isArray(v) && !v.length)) return;
+                        dl.append(el('dt', '', k)); dl.append(el('dd', '', v)); }
+
+function renderDecision(d, box) {
+  const o = d.obs || {};
+  const key = 'p' + d.ply;
+  if (d.fallback) box.append(el('div', 'banner bad', '⚠ 模型未给出有效着法，本步为随机保底'));
+  (d.warnings || []).filter(w => !d.fallback).forEach(w => box.append(el('div', 'banner warn', w)));
+  if (d.fallback) (d.warnings || []).forEach(w => box.append(el('div', 'meta', '· ' + w)));
+  const head = el('div', ''); head.append(el('b', '', '我方走 ' + d.move_san));
+  if (o.complexity) head.append(el('span', 'cx ' + o.complexity,
+    ({simple: '简单', medium: '中等', complex: '复杂'})[o.complexity] || o.complexity));
+  head.append(el('span', 'meta', '　' + (d.elapsed != null ? `用时 ${d.elapsed} 秒，` : '') +
+    `尝试 ${d.attempts} 次，调用工具 ${d.tools.length} 次` +
+    (d.first_choice && d.first_choice !== d.move_san ? `，初选 ${d.first_choice}` : '')));
+  box.append(head);
+  const dl0 = el('dl', 'kv');
+  kv(dl0, '复杂度判断', o.complexity_reason);
+  kv(dl0, '对方意图', d.opp_intent);
+  box.append(dl0);
+  if (d.think) box.append(el('div', 'think', d.think));
+  if (d.reasoning) box.append(det(key + 'r', `完整思考过程（${d.reasoning.length} 字）`, el('pre', '', d.reasoning)));
+  const dl = el('dl', 'kv');
+  for (const k of Object.keys(OBS_LABELS)) kv(dl, OBS_LABELS[k], typeof o[k] === 'string' ? o[k] : JSON.stringify(o[k]));
+  box.append(dl);
+  if (Array.isArray(o.candidates) && o.candidates.length) {
+    const t = el('table'); const tr = el('tr'); ['候选', '优点', '缺点'].forEach(h => tr.append(el('th', '', h)));
+    t.append(tr);
+    o.candidates.forEach(c => { const r = el('tr'); r.append(el('td', 'mv', c.move || ''));
+      r.append(el('td', '', c.pros || '')); r.append(el('td', '', c.cons || '')); t.append(r); });
+    box.append(el('h2', '', '候选着法')); box.append(t);
+  }
+  if (Array.isArray(o.pv) && o.pv.length) {
+    box.append(el('h2', '', '预期主变 PV'));
+    const pv = el('div', 'pv'); o.pv.forEach(m => pv.append(el('span', '', String(m)))); box.append(pv);
+  }
+  if (Array.isArray(o.self_check) && o.self_check.length) {
+    box.append(el('h2', '', '落子前自检'));
+    o.self_check.forEach(c => {
+      const changed = !!c.changed_to;
+      const card = el('div', 'check ' + (changed ? 'change' : 'keep'));
+      card.append(el('b', '', `第 ${c.round} 轮：复查 ${c.checked} → ` + (changed ? `改为 ${c.changed_to}` : '保持')));
+      const dl2 = el('dl', 'kv');
+      kv(dl2, '对方最强应着', c.opp_best_reply); kv(dl2, '危险', c.danger);
+      kv(dl2, '净得失', c.material_after); kv(dl2, '理由', c.reason); kv(dl2, '备注', c.note);
+      card.append(dl2);
+      if (c.reasoning) card.append(det(key + 'c' + c.round, `自检思考过程（${c.reasoning.length} 字）`, el('pre', '', c.reasoning)));
+      box.append(card);
+    });
+  }
+  if (Array.isArray(d.recalled) && d.recalled.length) {
+    box.append(el('h2', '', '自动召回的经验'));
+    d.recalled.forEach(h => box.append(el('div', 'meta', `· [${h.score}] ${h.text}`)));
+  }
+  if (d.tools.length) {
+    box.append(el('h2', '', '工具调用'));
+    d.tools.forEach((t, i) => box.append(det(key + 't' + i,
+      `${t.name}(${Object.values(t.args || {}).join(', ')})`, el('pre', '', t.result))));
+  }
+}
+
+function renderDetail() {
+  const box = $('detail'); box.replaceChildren();
+  const n = S.moves_san.length;
+  if (S.status === 'thinking' && sel === n) {
+    const sec = Math.max(0, Date.now() / 1000 - (S.thinking_since || Date.now() / 1000)).toFixed(0);
+    const b = el('div', 'banner info'); b.append(el('span', 'dot'));
+    b.append(document.createTextNode(`第 ${S.thinking_ply} 步 · ${S.stage || '思考中'}… 已 ${sec} 秒`));
+    box.append(b);
+    (S.current_tools || []).forEach(t => { const de = el('details'); de.open = true;
+      de.append(el('summary', '', `已调用 ${t.name}(${Object.values(t.args || {}).join(', ')})`));
+      de.append(el('pre', '', t.result)); box.append(de); });
+    return;
+  }
+  if (sel === 0) { box.append(el('div', 'empty', '开局位置')); return; }
+  const d = S.decisions[String(sel)];
+  const title = el('h2', '', `第 ${Math.ceil(sel / 2)} 回合 · ${sel % 2 ? '白' : '黑'}方 ${S.moves_san[sel - 1]}`);
+  box.append(title);
+  if (isMine(sel) && d) renderDecision(d, box);
+  else if (isMine(sel)) box.append(el('div', 'meta', '这一步没有记录到思考过程'));
+  else {
+    box.append(el('div', 'meta', `对手（${S.opponent || '?'}）的着法`));
+    const prev = S.decisions[String(sel - 1)];
+    if (sel > 1 && prev) {
+      box.append(el('h2', '', `↓ 我方上一步（${S.moves_san[sel - 2]}）的思考`));
+      renderDecision(prev, box);
+    }
+  }
+  if (S.result) box.append(el('div', 'banner info', '结果：' + S.result));
+}
+
+function render() {
+  const n = S.moves_san.length;
+  if (sel > n) sel = n;
+  $('status').textContent = STATUS[S.status] || S.status;
+  $('status').className = 'badge ' + S.status;
+  $('meta').textContent = S.game_id ? `${S.mode === 'lichess' ? 'Lichess' : '本地'} · 我执${S.my_color} · 对手 ${S.opponent || '?'}` +
+    (S.result ? ` · 结果 ${S.result}` : '') : '';
+  $('pos').textContent = `${sel} / ${n}`;
+  renderBoard(); renderMoves(); renderDetail();
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/state', {cache: 'no-store'}); const s = await r.json();
+    if (s.game_id && s.updated_at !== updated) {
+      const newGame = !S || S.game_id !== s.game_id;
+      S = s; updated = s.updated_at;
+      if (newGame) { sel = 0; $('follow').checked = true; }
+      if ($('follow').checked) sel = S.moves_san.length;
+      render();
+    } else if (S && S.status === 'thinking') renderDetail();   // 刷新“已思考 N 秒”
+  } catch (e) { /* 服务暂时不可用，下次再试 */ }
+}
+
+const go = p => { if (!S) return; sel = Math.max(0, Math.min(S.moves_san.length, p));
+                  $('follow').checked = sel === S.moves_san.length; render(); };
+$('first').onclick = () => go(0); $('prev').onclick = () => go(sel - 1);
+$('next').onclick = () => go(sel + 1); $('last').onclick = () => go(1e9);
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') go(sel - 1); else if (e.key === 'ArrowRight') go(sel + 1);
+  else if (e.key === 'Home') go(0); else if (e.key === 'End') go(1e9);
+});
+poll(); setInterval(poll, 1000);
+</script>
+</body>
+</html>

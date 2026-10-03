@@ -1,6 +1,12 @@
-import requests
+import os
 
-TOKEN = "你的token"
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+TOKEN = os.getenv("LICHESS_TOKEN")
+if not TOKEN:
+    raise SystemExit("请先在 .env 中设置 LICHESS_TOKEN")
 
 headers = {
     "Authorization": f"Bearer {TOKEN}"
