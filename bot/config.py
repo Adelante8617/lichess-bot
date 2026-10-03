@@ -46,6 +46,10 @@ WAIT_TIMEOUT_SEC = int(os.getenv("WAIT_TIMEOUT_SEC", "60"))
 BOARD_RELATIONS = os.getenv("BOARD_RELATIONS", "0") == "1"   # prompt 附上子力关系图
 ANALYSIS_BOARD = os.getenv("ANALYSIS_BOARD", "0") == "1"     # 提供 play_line 分析棋盘工具
 PLAN_MEMORY = os.getenv("PLAN_MEMORY", "1") == "1"           # 把上一步定下的战略方针带给下一步
+# 1 = 先用一次不思考的调用定下紧急情况 / 战略方针 / ≤3 个候选，再让决策调用只计算这几个候选。
+# 思考模型的隐藏推理不受提示词约束，会逐个试合法着法；关掉第一步的思考才能强制"先定方针"
+STRATEGY_STAGE = os.getenv("STRATEGY_STAGE", "0") == "1"
+STRATEGY_STAGE_MAX_TOKENS = int(os.getenv("STRATEGY_STAGE_MAX_TOKENS", "2048"))
 # 单步内最多几轮工具往返；开分析棋盘时默认放宽，便于多次摆变化
 TOOL_ROUNDS = int(os.getenv("TOOL_ROUNDS", "10" if ANALYSIS_BOARD else "3"))
 

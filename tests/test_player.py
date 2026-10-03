@@ -117,6 +117,32 @@ class GetMoveTest(unittest.TestCase):
         self.assertIn("你上一步定下的战略方针", decision_prompt)
         self.assertIn("抢占中心后王车易位", decision_prompt)
 
+    def test_strategy_stage_limits_candidates(self):
+        board = chess.Board()
+        client = FakeClient({"think": "x", "pv": ["d4"], "move": "d4"}, [keep("d4")])
+        stage_reply = {"urgent": "无", "strategy": "抢中心",
+                       "candidates": [{"move": "d4"}, {"move": "Ke2"}, {"move": "e4"}]}
+        original = client._create
+
+        def create(**kw):
+            if "先不要选着" in kw["messages"][-1]["content"]:
+                client.prompts.append(kw["messages"][-1]["content"])
+                return _msg(json.dumps(stage_reply, ensure_ascii=False))
+            return original(**kw)
+
+        client.chat.completions.create = create
+        llm._client = client
+        player.STRATEGY_STAGE = True
+        try:
+            uci, _, _, obs = player.get_llm_move(board, 1, None, None)
+        finally:
+            player.STRATEGY_STAGE = False
+        self.assertEqual(uci, "d2d4")
+        self.assertEqual(obs["strategy"], "抢中心")  # 决策回答没给 strategy 时沿用第一阶段
+        decision_prompt = next(p for p in client.prompts if "【当前局面，轮到你走】" in p)
+        self.assertIn("第一阶段已定下的结论", decision_prompt)
+        self.assertNotIn("- Ke2", decision_prompt)  # 非法候选被过滤
+
     def test_illegal_then_fallback(self):
         board = chess.Board()
         llm._client = FakeClient({"move": "Ke2"}, [])

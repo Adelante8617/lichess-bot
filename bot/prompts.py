@@ -214,3 +214,27 @@ def self_check_prompt(san: str, board_after: str, opp: str, relations: str, comp
   "move": "keep 时填 {san}；change 时填新着法",
   "reason": "≤80 字"
 }}"""
+
+
+STRATEGY_STAGE_PROMPT = """先不要选着，也不要计算变化。只完成思考流程的第 1-3 步：
+1. 紧急情况：直接威胁与立即机会（看对方上一步、被攻击且保护不足的子、能白吃的子、将军）。
+2. 战略方针：根据子力分值、王的安全、兵形、子力活跃度，定下接下来 3-5 步的方针。
+3. 候选：最多 3 个，只能来自第 1 步的应对 / 机会或第 2 步的方针，逐字取自合法走法列表。
+
+严格输出 JSON（不要 markdown）：
+{"opp_intent": "≤40 字", "urgent": "≤60 字，没有写 无", "strategy": "≤60 字",
+ "candidates": [{"move": "SAN", "purpose": "应对威胁/战术机会/推进方针", "idea": "≤30 字"}]}"""
+
+
+def strategy_stage_section(urgent: str, strategy: str, candidates: list[dict]) -> str:
+    """把第一阶段的结论附到决策 prompt 后面，限定第二阶段只算这些候选。"""
+    lines = "\n".join(f"- {c['move']}（{c.get('purpose', '')}）：{c.get('idea', '')}" for c in candidates)
+    return f"""
+
+==== 第一阶段已定下的结论（这一步只做第 4、5 步）====
+紧急情况：{urgent or '无'}
+战略方针：{strategy}
+候选：
+{lines}
+只对上面这些候选做针对性计算，然后选一个。不要另找其他着法；只有在计算中发现所有候选都会白丢子时，
+才可以补充一个应对该威胁的着法。JSON 里的 urgent / strategy 沿用上面的结论（计算中发现错误可以修正）。"""

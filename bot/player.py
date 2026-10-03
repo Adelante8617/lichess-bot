@@ -11,11 +11,12 @@ from .boardtext import (COLOR_ZH, board_meta, describe_last_move, display_san, l
 from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, COMPLEXITY_CHECK, COMPLEXITY_DEFAULT,
                      COMPLEXITY_PROFILE, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT, MATERIAL_LEAD_SKIP,
                      OPENING_EFFORT, OPENING_FAST_MOVES, PLAN_MEMORY, SELF_CHECK_EFFORT,
-                     SELF_CHECK_ROUNDS, TOOL_ROUNDS)
+                     SELF_CHECK_ROUNDS, STRATEGY_STAGE, STRATEGY_STAGE_MAX_TOKENS, TOOL_ROUNDS)
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
 from .memory import recall_experience
-from .prompts import complexity_prompt, self_check_prompt, system_prompt, user_prompt
+from .prompts import (STRATEGY_STAGE_PROMPT, complexity_prompt, self_check_prompt, strategy_stage_section,
+                      system_prompt, user_prompt)
 from .tools import play_tools, run_tool
 
 
@@ -99,6 +100,32 @@ def self_check(board: chess.Board, messages: list, move: chess.Move,
             rec["note"] = f"自检轮数已用完，{rec['changed_to']} 未经复查"
             print(f"[SELF-CHECK] {rec['note']}")
     return current, records
+
+
+def strategy_stage(board: chess.Board, messages: list) -> dict | None:
+    """第一阶段：关闭思考，只定紧急情况 / 战略方针 / ≤3 个候选。
+    不给思考空间，模型就没法把合法着法逐个试一遍。失败或没有合法候选时返回 None（退回单阶段）。"""
+    live.stage("第一阶段：定方针与候选")
+    try:
+        msg, _ = llm_call(messages + [{"role": "user", "content": STRATEGY_STAGE_PROMPT}],
+                          levels=["off"], max_tokens=STRATEGY_STAGE_MAX_TOKENS)
+    except Exception as e:
+        print(f"[STAGE1] LLM failed: {e}")
+        return None
+    obj = extract_json((msg.content or "").strip()) or {}
+    candidates = []
+    for c in obj.get("candidates") or []:
+        mv = parse_model_move(board, str(c.get("move", ""))) if isinstance(c, dict) else None
+        if mv is not None and all(x["move"] != display_san(board, mv) for x in candidates):
+            candidates.append({"move": display_san(board, mv), "purpose": str(c.get("purpose", "")),
+                               "idea": str(c.get("idea", ""))})
+    if not candidates:
+        print(f"[STAGE1] 没有合法候选，退回单阶段: {obj!r}")
+        return None
+    stage = {"urgent": str(obj.get("urgent", "")).strip(), "strategy": str(obj.get("strategy", "")).strip(),
+             "candidates": candidates[:3]}
+    print(f"[STAGE1] 方针: {stage['strategy']} | 候选: {', '.join(c['move'] for c in stage['candidates'])}")
+    return stage
 
 
 def is_opening_fast(board: chess.Board, prev_board: chess.Board | None,
@@ -208,6 +235,11 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         {"role": "system", "content": system_prompt()},
         {"role": "user", "content": prompt},
     ]
+    stage = strategy_stage(board, messages) if STRATEGY_STAGE and not fast else None
+    if stage:
+        # 附在 user 提示末尾（而不是新增消息），非法着法重试时保留的 messages[:2] 里也有它
+        messages[1]["content"] += strategy_stage_section(stage["urgent"], stage["strategy"],
+                                                         stage["candidates"])
 
     think, opp_intent, reasoning = "", "", ""
     obs: dict = {}
@@ -268,7 +300,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
             cur_obs = {k: obj.get(k, "") for k in OBS_KEYS}
             if complexity:  # 以独立判断的复杂度为准
                 cur_obs["complexity"], cur_obs["complexity_reason"] = complexity, complexity_reason
-            cur_obs["strategy"] = str(cur_obs.get("strategy") or "").strip()
+            cur_obs["strategy"] = str(cur_obs.get("strategy") or (stage or {}).get("strategy", "")).strip()
             pv = cur_obs.get("pv")
             if cur_move and isinstance(pv, list) and pv \
                     and strip_check(str(pv[0])) != strip_check(cur_move):
