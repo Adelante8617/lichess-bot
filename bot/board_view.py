@@ -11,8 +11,8 @@
 """
 import chess
 
-PIECE_ZH = {chess.KING: "王", chess.QUEEN: "后", chess.ROOK: "车",
-            chess.BISHOP: "象", chess.KNIGHT: "马", chess.PAWN: "兵"}
+from .boardtext import PIECE_ZH, parse_model_move, render_board
+
 SIDE_ZH = {chess.WHITE: "白", chess.BLACK: "黑"}
 ORDER = (chess.KING, chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT, chess.PAWN)
 DIRS = {chess.ROOK: ((0, 1), (0, -1), (1, 0), (-1, 0)),
@@ -25,19 +25,6 @@ def pname(board: chess.Board, sq: int) -> str:
     """'白马f3' 形式。"""
     p = board.piece_at(sq)
     return f"{SIDE_ZH[p.color]}{PIECE_ZH[p.piece_type]}{chess.square_name(sq)}"
-
-
-def render_board(board: chess.Board) -> str:
-    rows = ["   a  b  c  d  e  f  g  h"]
-    for rank in range(7, -1, -1):
-        cells = []
-        for file in range(8):
-            p = board.piece_at(chess.square(file, rank))
-            cells.append(" ." if p is None else
-                         f"{'W' if p.color == chess.WHITE else 'B'}{p.symbol().upper()}")
-        rows.append(f"{rank + 1}  " + " ".join(cells))
-    rows.append("   a  b  c  d  e  f  g  h")
-    return "\n".join(rows)
 
 
 def _names(board: chess.Board, squares) -> str:
@@ -138,20 +125,6 @@ def relations_text(board: chess.Board) -> str:
     return "\n\n".join(sections)
 
 
-def _parse(board: chess.Board, text: str) -> chess.Move | None:
-    text = (text or "").strip().rstrip("+#!?")
-    for cand in (text, text.replace("0", "O")):
-        try:
-            return board.parse_san(cand)
-        except ValueError:
-            pass
-    try:
-        mv = chess.Move.from_uci(text)
-        return mv if mv in board.legal_moves else None
-    except ValueError:
-        return None
-
-
 def _material(board: chess.Board, color: bool) -> str:
     return " ".join(f"{PIECE_ZH[pt]}{len(board.pieces(pt, color))}" for pt in ORDER[1:]
                     if board.pieces(pt, color)) or "仅剩王"
@@ -164,7 +137,7 @@ def play_line(board: chess.Board, moves: list) -> str:
     moves = [str(m) for m in (moves or [])][:MAX_LINE_PLIES]
     stopped = ""
     for i, text in enumerate(moves, 1):
-        mv = _parse(b, text)
+        mv = parse_model_move(b, text)
         if mv is None:
             stopped = (f"第 {i} 步 '{text}' 在该局面不合法（此时轮到{SIDE_ZH[b.turn]}方），"
                        f"已停在第 {i - 1} 步之后。")

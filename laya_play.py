@@ -36,7 +36,7 @@ import chess.engine
 import chess.pgn
 from dotenv import load_dotenv
 
-from live import live
+from bot.live import live
 
 load_dotenv()
 

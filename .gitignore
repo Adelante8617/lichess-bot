@@ -29,3 +29,6 @@ dist/
 *.swp
 .DS_Store
 Thumbs.db
+
+# === Local run output ===
+*.out

@@ -26,7 +26,7 @@ import chess.engine
 import chess.pgn
 
 import main as bot  # 导入不会启动 Lichess 主循环
-from live import live
+from bot.live import live
 
 
 def parse_human_move(board: chess.Board, text: str) -> chess.Move | None:
