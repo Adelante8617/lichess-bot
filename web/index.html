@@ -124,6 +124,7 @@
 <script>
 const PIECES = {k:'♚', q:'♛', r:'♜', b:'♝', n:'♞', p:'♟'};
 const OBS_LABELS = {
+  urgent: '紧急情况', strategy: '战略方针',
   my_attacked: '我方被攻击', opp_attacked: '对方被攻击', my_hanging: '我方悬子', opp_hanging: '对方悬子',
   check_chance: '将军机会', capture_chance: '吃子机会', threats: '对方威胁', tactics: '战术机会',
   board_summary: '局面摘要', plan: '长期计划'
@@ -216,10 +217,10 @@ function renderDecision(d, box) {
   for (const k of Object.keys(OBS_LABELS)) kv(dl, OBS_LABELS[k], typeof o[k] === 'string' ? o[k] : JSON.stringify(o[k]));
   box.append(dl);
   if (Array.isArray(o.candidates) && o.candidates.length) {
-    const t = el('table'); const tr = el('tr'); ['候选', '优点', '缺点'].forEach(h => tr.append(el('th', '', h)));
+    const t = el('table'); const tr = el('tr'); ['候选', '用途', '优点', '缺点'].forEach(h => tr.append(el('th', '', h)));
     t.append(tr);
     o.candidates.forEach(c => { const r = el('tr'); r.append(el('td', 'mv', c.move || ''));
-      r.append(el('td', '', c.pros || '')); r.append(el('td', '', c.cons || '')); t.append(r); });
+      r.append(el('td', '', c.purpose || '')); r.append(el('td', '', c.pros || '')); r.append(el('td', '', c.cons || '')); t.append(r); });
     box.append(el('h2', '', '候选着法')); box.append(t);
   }
   if (Array.isArray(o.pv) && o.pv.length) {

@@ -15,7 +15,7 @@ from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, COMPLEXITY_CHECK, COMPLEXI
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
 from .memory import recall_experience
-from .prompts import self_check_prompt, system_prompt
+from .prompts import complexity_prompt, self_check_prompt, system_prompt, user_prompt
 from .tools import play_tools, run_tool
 
 
@@ -25,8 +25,8 @@ def fallback_move(legal_moves: list[str]) -> str:
     return random.choice(legal_moves)
 
 
-# 模型自己的长期计划：{我方颜色: (定下计划时的着法序列 UCI, 计划)}。
-# 新局面若不是在该序列基础上继续（换了一盘棋），计划自动作废。
+# 模型自己定下的战略方针：{我方颜色: (定下方针时的着法序列 UCI, 方针)}。
+# 新局面若不是在该序列基础上继续（换了一盘棋），方针自动作废。
 _plans: dict[bool, tuple[list[str], str]] = {}
 
 
@@ -39,8 +39,7 @@ def recall_plan(board: chess.Board) -> str:
     return plan if now[:len(moves)] == moves else ""
 
 
-OBS_KEYS = ["complexity", "complexity_reason", "my_attacked", "opp_attacked", "my_hanging",
-            "opp_hanging", "check_chance", "capture_chance", "threats", "tactics",
+OBS_KEYS = ["complexity", "complexity_reason", "urgent", "strategy",
             "candidates", "pv", "board_summary"]
 
 
@@ -125,24 +124,9 @@ def classify_complexity(board: chess.Board, last_section: str, legal_sans: list[
         tmp.push(chess.Move.null())
         opp_sans = ", ".join(legal_san_map(tmp))
     recent = " ".join(san_history(board).split()[-12:]) or "（尚无着法）"
-    prompt = f"""只判断当前局面的复杂度，不要选着、不要计算变化。
-盘面(白=W*, 黑=B*, '.'=空，第二个字母为子种 K/Q/R/B/N/P)，轮到{COLOR_ZH[board.turn]}走：
-{render_board(board)}
-
-对方刚走的一步：{last_section}
-最近着法：{recent}
-{board_meta(board)}
-
-我方合法走法（带 + 为将军）：{", ".join(legal_sans)}
-假如轮到对方走，对方的走法：{opp_sans}
-
-分级标准：
-- simple：常规出子/调动，双方都没有吃子或将军的着法；或只有一个明显应着（必须应将、必须吃回被兑的子）。
-- medium：常规中局，有若干合理计划，双方子力有接触但没有直接战术。
-- complex：存在吃子、将军、捉双、牵制、悬子、王翼攻击等直接战术，或残局需要精确计算。
-只要双方任一方有吃子或将军的着法，就不是 simple。
-
-严格输出 JSON（不要 markdown）：{{"complexity": "simple/medium/complex", "reason": "≤30 字"}}"""
+    prompt = complexity_prompt(side=COLOR_ZH[board.turn], board_text=render_board(board),
+                               last_move=last_section, recent=recent, meta=board_meta(board),
+                               legal_sans=legal_sans, opp_sans=opp_sans)
     live.stage("判断局面复杂度")
     try:
         msg, _ = llm_call([{"role": "user", "content": prompt}], levels=["off"], max_tokens=512)
@@ -211,56 +195,18 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
     else:
         recall_section = "（无）"
 
-    full_move = (ply + 1) // 2  # 1-based 回合
-    history = san_history(board) or "（尚无着法）"
-
-    aid_section = ""
-    if BOARD_RELATIONS:
-        aid_section += ("\n==== 子力关系（程序按规则列出的原始事实，不含任何判断）====\n"
-                        f"{board_view.relations_text(board)}\n")
-    if PLAN_MEMORY:
-        prev_plan = recall_plan(board)
-        aid_section += ("\n==== 你之前定下的计划 ====\n"
-                        f"{prev_plan or '（尚无，请根据局面制定）'}\n")
-
-    user_prompt = f"""【当前局面，轮到你走】
-盘面(白=W*, 黑=B*, '.'=空，第二个字母为子种 K/Q/R/B/N/P):
-{render_board(board)}
-
-【对方刚走的一步】
-{last_section}
-
-【对局至今的全部着法（SAN）】
-{history}
-（可据此回顾双方计划、你自己此前的布局意图，并留意是否在重复局面）
-
-==== 身份与子力 ====
-你执 {my_color_str}，只能移动自己的子。
-我方子力: {my_pieces}
-对方子力: {opp_pieces}
-
-==== 局面信息 ====
-{board_meta(board)}
-回合(ply): {ply}  全回合数(fullmove): {full_move}
-{aid_section}
-==== 经验库自动召回（仅供参考，与当前局面不符就忽略）====
-{recall_section}
-
-合法走法（SAN，已替你过滤，只含你能走的着；带 + 表示该着会将军）:
-{", ".join(legal_sans)}
-
-要求：
-{"- 【开局快速模式】这是常规开局阶段：按开局原则（或调用 search_opening_book）快速选着，不要长时间计算；complexity 填 simple，think ≤60 字，pv 给 3 步即可；只需确认所走的子不会被白吃。" if fast else
-  f"- 本步局面复杂度已单独判定为 {complexity}（{complexity_reason}），按此档决定思考投入（见系统提示第 0 节），complexity 字段照填 {complexity}；" if complexity else
-  "- 先判断局面复杂度，按复杂度决定思考投入（见系统提示第 0 节）；"}
-- 落子前完成系统提示 D 节的安全检查；
-- move 必须逐字取自上面的合法走法列表，且等于 pv[0]；candidates / pv 全部用 SAN。
-
-请按系统提示输出完整 JSON。"""
+    prompt = user_prompt(
+        board_text=render_board(board), last_move=last_section,
+        history=san_history(board) or "（尚无着法）", my_color=my_color_str,
+        my_pieces=my_pieces, opp_pieces=opp_pieces, meta=board_meta(board), ply=ply,
+        relations=board_view.relations_text(board) if BOARD_RELATIONS else "",
+        prev_strategy=recall_plan(board) if PLAN_MEMORY else None,
+        recalled=recall_section, legal_sans=legal_sans, fast=fast,
+        complexity=complexity, complexity_reason=complexity_reason)
 
     messages = [
         {"role": "system", "content": system_prompt()},
-        {"role": "user", "content": user_prompt},
+        {"role": "user", "content": prompt},
     ]
 
     think, opp_intent, reasoning = "", "", ""
@@ -322,8 +268,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
             cur_obs = {k: obj.get(k, "") for k in OBS_KEYS}
             if complexity:  # 以独立判断的复杂度为准
                 cur_obs["complexity"], cur_obs["complexity_reason"] = complexity, complexity_reason
-            if PLAN_MEMORY:
-                cur_obs["plan"] = str(obj.get("plan", "")).strip()
+            cur_obs["strategy"] = str(cur_obs.get("strategy") or "").strip()
             pv = cur_obs.get("pv")
             if cur_move and isinstance(pv, list) and pv \
                     and strip_check(str(pv[0])) != strip_check(cur_move):
@@ -350,8 +295,8 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
                 if display_san(board, mv) != chosen_san:
                     warnings.append(f"自检后改选：{chosen_san} → {display_san(board, mv)}")
                     obs["pv"] = []  # 原主变基于旧着法，已失效
-            if PLAN_MEMORY and obs.get("plan"):
-                _plans[board.turn] = ([m.uci() for m in board.move_stack] + [mv.uci()], obs["plan"])
+            if PLAN_MEMORY and obs.get("strategy"):
+                _plans[board.turn] = ([m.uci() for m in board.move_stack] + [mv.uci()], obs["strategy"])
             live.decision(ply, move_san=display_san(board, mv), move_uci=mv.uci(),
                           first_choice=chosen_san, think=think, opp_intent=opp_intent, obs=obs,
                           reasoning=reasoning, recalled=recalled_view,

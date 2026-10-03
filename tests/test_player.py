@@ -16,7 +16,7 @@ os.chdir(tempfile.mkdtemp(prefix="lichess-bot-test-"))
 # 钉死开关，不受本机 .env 影响（load_dotenv 不覆盖已存在的环境变量）
 os.environ.update({"AUTO_RECALL_K": "0", "SELF_CHECK_ROUNDS": "2", "OPENING_FAST_MOVES": "0",
                    "COMPLEXITY_CHECK": "1", "THINK_LADDER": "default", "MATERIAL_LEAD_SKIP": "8",
-                   "BOARD_RELATIONS": "0", "ANALYSIS_BOARD": "0", "PLAN_MEMORY": "0"})
+                   "BOARD_RELATIONS": "0", "ANALYSIS_BOARD": "0", "PLAN_MEMORY": "1"})
 
 import chess  # noqa: E402
 
@@ -102,6 +102,20 @@ class GetMoveTest(unittest.TestCase):
         uci, think, _, obs = player.get_llm_move(board, 1, None, None)
         self.assertEqual(uci, "e2e4")
         self.assertEqual(obs["complexity"], "medium")
+
+    def test_strategy_carried_to_next_move(self):
+        board = chess.Board()
+        decision = {"strategy": "抢占中心后王车易位", "think": "x", "pv": ["e4"], "move": "e4"}
+        llm._client = FakeClient(decision, [keep("e4")])
+        uci, *_ = player.get_llm_move(board, 1, None, None)
+        board.push_uci(uci)
+        prev = board.copy()
+        board.push_san("e5")
+        llm._client = FakeClient(dict(decision, move="Nf3", pv=["Nf3"]), [keep("Nf3")])
+        player.get_llm_move(board, 3, prev, "e7e5")
+        decision_prompt = next(p for p in llm._client.prompts if "【当前局面，轮到你走】" in p)
+        self.assertIn("你上一步定下的战略方针", decision_prompt)
+        self.assertIn("抢占中心后王车易位", decision_prompt)
 
     def test_illegal_then_fallback(self):
         board = chess.Board()
