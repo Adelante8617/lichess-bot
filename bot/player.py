@@ -15,7 +15,7 @@ from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, COMPLEXITY_CHECK, COMPLEXI
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
 from .memory import recall_experience
-from .prompts import system_prompt
+from .prompts import self_check_prompt, system_prompt
 from .tools import play_tools, run_tool
 
 
@@ -48,39 +48,22 @@ def self_check(board: chess.Board, messages: list, move: chess.Move,
                legal_sans: list[str], complexity: str, levels: list[str] | None = None,
                max_tokens: int | None = None) -> tuple[chess.Move, list[dict]]:
     """落子前自检：让模型站在对方角度重新审视选定着法，发现会白丢子就换。
-    只让模型自己复查，程序不做任何局面判断。返回 (最终着法, 每轮自检记录)。"""
+    只让模型自己复查，程序不做任何局面判断。返回 (最终着法, 每轮自检记录)。
+
+    前几轮否决过的着法（连同否决理由）会带进后续轮次，且不允许改回去：
+    否则第二轮看不到第一轮的结论，会出现 Qxh2 → Qxd4 → Qxh2 这样的来回摇摆。"""
     records = []
     current = move
+    rejected: dict[chess.Move, str] = {}  # 已否决的着法 → 否决理由
     for rnd in range(1, SELF_CHECK_ROUNDS + 1):
         san = display_san(board, current)
         after = board.copy()
         after.push(current)
-        opp = COLOR_ZH[after.turn]
         live.stage(f"第 {rnd} 轮自检：复查 {san}")
-        relations = (f"\n子力关系（程序按规则列出的原始事实，从{opp}的视角）：\n"
-                     f"{board_view.relations_text(after)}\n" if BOARD_RELATIONS else "")
-        prompt = f"""在真正落子前做一次独立复查。你准备走 {san}。
-不要沿用刚才的结论，重新看盘面。走完 {san} 之后的局面如下（轮到{opp}走）：
-{render_board(after)}
-{relations}
-请站在{opp}的角度，找出{opp}此时最强的应着，并回答：
-1) 我刚走的子落点被对方哪些子攻击、被我方哪些子保护？
-2) 这步是否让我方其他子失去保护？
-3) 对方最强应着之后，我方净得失多少子力？
-局面复杂度为 {complexity or "未知"}：simple 局面简短核对即可，complex 局面要认真计算。
-
-如果 {san} 会白白丢子或导致严重后果，改选一个更好的着法（必须来自原合法走法列表）：
-{", ".join(legal_sans)}
-
-严格输出 JSON（不要 markdown）：
-{{
-  "opp_best_reply": "对方最强应着（SAN）",
-  "danger": "走完后我方面临的具体危险，没有则写 无",
-  "material_after": "对方最强应着后我方净得失，如 -3（丢马）/ 0 / +1",
-  "verdict": "keep 或 change",
-  "move": "keep 时填 {san}；change 时填新着法",
-  "reason": "≤80 字"
-}}"""
+        relations = board_view.relations_text(after) if BOARD_RELATIONS else ""
+        rejected_view = {display_san(board, m): r for m, r in rejected.items()}
+        prompt = self_check_prompt(san, render_board(after), COLOR_ZH[after.turn], relations,
+                                   complexity, legal_sans, rejected_view)
         msgs = messages + [{"role": "user", "content": prompt}]
         try:
             msg, _ = llm_call(msgs, levels=levels, max_tokens=max_tokens)
@@ -102,10 +85,20 @@ def self_check(board: chess.Board, messages: list, move: chess.Move,
             rec["note"] = "改选的着法无效或与原着法相同，保持原着法"
             print(f"[SELF-CHECK] {rec['note']}: {obj.get('move')!r}")
             break
+        if new in rejected:
+            # 想改回之前否决过的着法：两步都被判定有问题，保留本轮刚复查过的这步，不再摇摆
+            rec["note"] = (f"想改回已否决的 {display_san(board, new)}（理由：{rejected[new]}），"
+                           f"拒绝改回，保持 {san}")
+            print(f"[SELF-CHECK] {rec['note']}")
+            break
+        rejected[current] = rec["reason"] or rec["danger"] or "自检判定有问题"
         print(f"[SELF-CHECK] 改选 {san} -> {display_san(board, new)}")
         rec["changed_to"] = display_san(board, new)
         current = new
-        # 进入下一轮时复查新着法；最后一轮的改选不再复查
+        if rnd == SELF_CHECK_ROUNDS:
+            # 自检轮数用完，新着法没有再被复查；它仍好过已被否决的着法，照常采用，但标明出来
+            rec["note"] = f"自检轮数已用完，{rec['changed_to']} 未经复查"
+            print(f"[SELF-CHECK] {rec['note']}")
     return current, records
 
 

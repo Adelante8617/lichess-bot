@@ -99,3 +99,37 @@ def system_prompt() -> str:
     if not extra:
         return SYSTEM_PROMPT
     return SYSTEM_PROMPT + "\n\nF. 棋盘辅助与计划：\n" + "\n".join(extra)
+
+
+def self_check_prompt(san: str, board_after: str, opp: str, relations: str, complexity: str,
+                      legal_sans: list[str], rejected: dict[str, str]) -> str:
+    """落子前自检。rejected：前几轮已否决的着法 → 否决理由，不允许改回。"""
+    relations_section = (f"\n子力关系（程序按规则列出的原始事实，从{opp}的视角）：\n{relations}\n"
+                         if relations else "")
+    rejected_section = ""
+    if rejected:
+        lines = "\n".join(f"- {m}：{r}" for m, r in rejected.items())
+        rejected_section = (f"\n前几轮复查已经否决了下面的着法，不能再改回它们：\n{lines}\n"
+                            f"如果你认为 {san} 也有问题，但想不出比它更好、且不在上面名单里的着法，就选 keep。\n")
+    return f"""在真正落子前做一次独立复查。你准备走 {san}。
+不要沿用刚才的结论，重新看盘面。走完 {san} 之后的局面如下（轮到{opp}走）：
+{board_after}
+{relations_section}
+请站在{opp}的角度，找出{opp}此时最强的应着，并回答：
+1) 我刚走的子落点被对方哪些子攻击、被我方哪些子保护？
+2) 这步是否让我方其他子失去保护？
+3) 对方最强应着之后，我方净得失多少子力？
+局面复杂度为 {complexity or "未知"}：simple 局面简短核对即可，complex 局面要认真计算。
+{rejected_section}
+如果 {san} 会白白丢子或导致严重后果，改选一个更好的着法（必须来自原合法走法列表）：
+{", ".join(legal_sans)}
+
+严格输出 JSON（不要 markdown）：
+{{
+  "opp_best_reply": "对方最强应着（SAN）",
+  "danger": "走完后我方面临的具体危险，没有则写 无",
+  "material_after": "对方最强应着后我方净得失，如 -3（丢马）/ 0 / +1",
+  "verdict": "keep 或 change",
+  "move": "keep 时填 {san}；change 时填新着法",
+  "reason": "≤80 字"
+}}"""
