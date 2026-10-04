@@ -32,3 +32,6 @@ Thumbs.db
 
 # === Local run output ===
 *.out
+
+# === Claude Code (worktrees, local settings) ===
+.claude/
