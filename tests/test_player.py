@@ -15,7 +15,7 @@ sys.path.insert(0, ROOT)
 os.chdir(tempfile.mkdtemp(prefix="lichess-bot-test-"))
 # 钉死开关，不受本机 .env 影响（load_dotenv 不覆盖已存在的环境变量）
 os.environ.update({"AUTO_RECALL_K": "0", "SELF_CHECK_ROUNDS": "2", "OPENING_FAST_MOVES": "0",
-                   "COMPLEXITY_CHECK": "1", "THINK_LADDER": "default", "MATERIAL_LEAD_SKIP": "8",
+                   "COMPLEXITY_CHECK": "1", "THINK_LADDER": "default", "MATERIAL_LEAD_SKIP": "12",
                    "BOARD_RELATIONS": "0", "ANALYSIS_BOARD": "0", "PLAN_MEMORY": "1"})
 
 import chess  # noqa: E402

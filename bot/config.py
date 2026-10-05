@@ -72,8 +72,9 @@ COMPLEXITY_CHECK = os.getenv("COMPLEXITY_CHECK", "1") == "1"   # 0 = 关闭，�
 COMPLEXITY_PROFILE = json.loads(os.getenv("COMPLEXITY_PROFILE") or
                                 '{"simple": ["off", 4096], "medium": ["low", 8192], "complex": ["high", 16384]}')
 COMPLEXITY_DEFAULT = os.getenv("COMPLEXITY_DEFAULT", "medium")  # 判断失败时使用
-# 我方子力（兵1 马象3 车5 后9）领先 ≥ 该值时跳过复杂度判断，直接用 MATERIAL_LEAD_EFFORT（0 = 关闭）
-MATERIAL_LEAD_SKIP = int(os.getenv("MATERIAL_LEAD_SKIP", "8"))
+# 我方子力（兵1 马象3 车5 后9）领先 ≥ 该值时跳过复杂度判断，直接用 MATERIAL_LEAD_EFFORT（0 = 关闭）。
+# 默认 12 ≈ 多一个后加一个轻子：领先这么多时稳妥简化就够，少于这个领先仍可能被翻盘，要正常思考
+MATERIAL_LEAD_SKIP = int(os.getenv("MATERIAL_LEAD_SKIP", "12"))
 MATERIAL_LEAD_EFFORT = os.getenv("MATERIAL_LEAD_EFFORT", "low").strip().lower()
 
 
