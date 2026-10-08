@@ -267,6 +267,27 @@ class BookTest(unittest.TestCase):
         for n, want in ((1, 0.6), (2, 0.8), (3, 0.6 + 0.4 * (1 - 1 / 3)), (10, 0.96)):
             self.assertAlmostEqual(self.book.play_prob(n), want)
         self.assertLess(self.book.play_prob(1000), 1.0)
+        # 评估恰好为 0 仍按原公式
+        self.assertAlmostEqual(self.book.play_prob(1, 0), 0.6)
+
+    def test_play_prob_negative_eval_encourages_new_moves(self):
+        self.assertAlmostEqual(self.book.play_prob(1, -30), 0.0)   # 刚入谱：一定重新推理
+        self.assertAlmostEqual(self.book.play_prob(2, -30), 0.1)
+        self.assertAlmostEqual(self.book.play_prob(5, -1), 0.2 * (1 - 1 / 5))
+        self.assertLess(self.book.play_prob(1000, -30), 0.2)
+
+    def test_negative_eval_move_is_never_replayed_at_n1(self):
+        self.book.record_line(["e2e4"], [(0, -50)])  # 平均评估 -0.5：负分着法
+        client = FakeClient({"strategy": "x", "think": "x", "pv": ["d4"], "move": "d4"}, [keep("d4")])
+        llm._client = client
+        original = player.random.random
+        try:
+            player.random.random = lambda: 0.0  # 抽得再小，n=1 的负分着法也不照走
+            uci, *_ = player.get_llm_move(chess.Board(), 1, None, None)
+        finally:
+            player.random.random = original
+        self.assertEqual(uci, "d2d4")
+        self.assertTrue(client.prompts)
 
     def test_reasoning_that_repeats_book_move_raises_confirmation(self):
         self.book.record_line(["e2e4"], [(0, 10)])

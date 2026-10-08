@@ -42,7 +42,7 @@ def main():
             continue
         print(f"\n== 我执{side}（{len(part)} 条）==")
         for _, via, san, n, count, avg in part:
-            print(f"{via or '（开局）':<40} → {san:<7} n={n:<3} p={play_prob(n):.2f}  入谱 {count} 次  评估 {avg:+.2f}")
+            print(f"{via or '（开局）':<40} → {san:<7} n={n:<3} p={play_prob(n, avg):.2f}  入谱 {count} 次  评估 {avg:+.2f}")
 
 
 if __name__ == "__main__":

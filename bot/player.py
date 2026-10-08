@@ -273,13 +273,13 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
     hit = book.lookup(board) if BOOK_ENABLED else None
     if hit:
         # 重新推理后又选了这一步的次数越多（n），越可信，越不必再花时间重复推理
-        prob = book.play_prob(hit["n"])
+        prob = book.play_prob(hit["n"], hit["avg_cp"])
         roll = random.random()
         if roll < prob:
             print(f"[BOOK] 背谱：{hit['san']}（确认 {hit['n']} 次，照走概率 {prob:.2f}；"
-                  f"入谱 {hit['count']} 次，平均评估 {hit['avg_cp']}cp，该局面 {hit['options']} 个选择）")
+                  f"入谱 {hit['count']} 次，平均评估 {hit['avg_cp']:.0f}cp，该局面 {hit['options']} 个选择）")
             live.thinking(ply)
-            note = f"背谱：{hit['san']}（确认 {hit['n']} 次，照走概率 {prob:.2f}，赛后评估平均 {hit['avg_cp']}cp）"
+            note = f"背谱：{hit['san']}（确认 {hit['n']} 次，照走概率 {prob:.2f}，赛后评估平均 {hit['avg_cp']:.0f}cp）"
             obs = {"book": note}
             live.decision(ply, move_san=hit["san"], move_uci=hit["uci"], think=note, opp_intent="",
                           obs=obs, reasoning="", recalled=[], warnings=[], attempts=0, fallback=False)

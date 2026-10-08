@@ -59,17 +59,22 @@ def lookup(board: chess.Board) -> dict | None:
         key = (e["cp_sum"] / e["count"], e["count"])
         if best_key is None or key > best_key:
             best_key = key
-            best = {"uci": uci, "san": e["san"], "count": e["count"], "avg_cp": round(key[0]),
+            best = {"uci": uci, "san": e["san"], "count": e["count"], "avg_cp": key[0],
                     "n": 1 + e.get("confirm", 0), "options": len(moves)}
     return best
 
 
-def play_prob(n: int) -> float:
-    """命中谱时直接照走的概率：BOOK_PLAY_PROB + (1 - BOOK_PLAY_PROB) * (1 - 1/n)。
-    n = 这一步被选中的次数（入谱算 1 次，之后每次重新推理又选了它加 1）：
-    n=1 即基础概率（默认 0.6），n 越大越趋近 1，省得对已经反复确认的着法重复推理。"""
+def play_prob(n: int, avg_cp: float = 0) -> float:
+    """命中谱时直接照走的概率。n = 这一步被选中的次数（入谱算 1 次，之后每次重新推理又选了它加 1）。
+    - 赛后评估平均 ≥ 0：BOOK_PLAY_PROB + (1 - BOOK_PLAY_PROB) * (1 - 1/n)，
+      n=1 即基础概率（默认 0.6），n 越大越趋近 1，省得对反复确认的着法重复推理；
+    - 平均 < 0（这步让我方略处下风）：BOOK_NEG_PLAY_MAX * (1 - 1/n)（默认上限 0.2），
+      n=1 时为 0，一定重新推理，鼓励尝试新棋，少重复会造成劣势的局面。"""
+    n = max(1, n)
+    if avg_cp < 0:
+        return config.BOOK_NEG_PLAY_MAX * (1 - 1 / n)
     base = config.BOOK_PLAY_PROB
-    return base + (1 - base) * (1 - 1 / max(1, n))
+    return base + (1 - base) * (1 - 1 / n)
 
 
 def confirm(board: chess.Board, uci: str) -> int:
