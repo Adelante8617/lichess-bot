@@ -103,3 +103,11 @@ SELF_CHECK_EFFORT = os.getenv("SELF_CHECK_EFFORT", "low").strip().lower()
 
 SNAPSHOT_OK_DELTA = 50        # 走子后己方评估损失 < 该值（cp）才算"好棋"，才允许入库
 SNAPSHOT_DEDUPE_SIM = 0.95    # 与已有条目余弦相似度 ≥ 该值则视为重复，跳过
+
+# ---- 背谱：记住自己走过、且局面没有变差的开局，之后遇到同样局面按概率直接照走 ----
+BOOK_ENABLED = os.getenv("BOOK_ENABLED", "1") == "1"
+BOOK_PATH = os.getenv("BOOK_PATH", os.path.join("data", "opening_book.json"))
+BOOK_PLAY_PROB = float(os.getenv("BOOK_PLAY_PROB", "0.6"))   # 命中背谱时直接照走的概率，其余重新推理
+# 赛后用 Stockfish 评估我方每步走完后的局面（我方视角）；第一次低于该值的那步及之后都不入谱（-100 = -1.0 兵）
+BOOK_FLOOR_CP = int(os.getenv("BOOK_FLOOR_CP", "-100"))
+BOOK_MAX_MOVES = int(os.getenv("BOOK_MAX_MOVES", "15"))      # 每局最多记我方前几步

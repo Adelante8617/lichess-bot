@@ -217,3 +217,33 @@ def stockfish_eval_move(fen_before: str, move_uci: str):
             engine.quit()
         except Exception:
             pass
+
+
+def stockfish_opening_evals(uci_list: list[str], my_white: bool, max_moves: int,
+                            floor_cp: int) -> list[tuple[int, int]]:
+    """逐个评估我方前 max_moves 步走完后的局面（我方视角 cp），返回 [(uci_list 下标, cp)]。
+    评到第一个低于 floor_cp 的就停（该项也包含在内），后面的局面没有再评的意义。启动失败返回 []。"""
+    try:
+        engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+    except Exception as e:
+        print(f"[BOOK] Stockfish 启动失败: {e}")
+        return []
+    out: list[tuple[int, int]] = []
+    try:
+        board = chess.Board()
+        limit = chess.engine.Limit(depth=STOCKFISH_ANALYZE_DEPTH)
+        for i, uci in enumerate(uci_list):
+            mine = (board.turn == chess.WHITE) == my_white
+            board.push_uci(uci)
+            if not mine:
+                continue
+            cp = _cp_from_score(engine.analyse(board, limit)["score"], pov_white=my_white)
+            out.append((i, cp))
+            if cp < floor_cp or len(out) >= max_moves:
+                break
+        return out
+    finally:
+        try:
+            engine.quit()
+        except Exception:
+            pass

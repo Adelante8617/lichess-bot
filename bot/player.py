@@ -5,17 +5,17 @@ import random
 
 import chess
 
-from . import board_view
+from . import board_view, book
+from .archive import log_reasoning
 from .boardtext import (COLOR_ZH, board_meta, describe_last_move, display_san, legal_san_map,
                         material_lead, parse_model_move, piece_lists, render_board, san_history,
                         strip_check)
-from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, COMPLEXITY_CHECK, COMPLEXITY_DEFAULT,
-                     COMPLEXITY_PROFILE, HANG_GUARD, HANG_GUARD_MIN, HANG_GUARD_POSITIONAL,
-                     HANG_GUARD_ROUNDS, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT,
+from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, BOOK_ENABLED, BOOK_PLAY_PROB, COMPLEXITY_CHECK,
+                     COMPLEXITY_DEFAULT, COMPLEXITY_PROFILE, HANG_GUARD, HANG_GUARD_MIN,
+                     HANG_GUARD_POSITIONAL, HANG_GUARD_ROUNDS, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT,
                      MATERIAL_LEAD_SKIP, OPENING_EFFORT, OPENING_FAST_MOVES, PLAN_MEMORY,
                      SELF_CHECK_EFFORT, SELF_CHECK_ROUNDS, STRATEGY_STAGE, STRATEGY_STAGE_MAX_TOKENS,
                      TOOL_ROUNDS)
-from .archive import log_reasoning
 from .guard import material_risk, risk_text, verify_line
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
@@ -268,6 +268,21 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
     if not san_map:
         return None, "no legal move", "", {}
     legal_sans = list(san_map)
+
+    # 背谱：当前局面在谱里时，按概率直接照走；否则（或抽到重新推理）走正常流程
+    hit = book.lookup(board) if BOOK_ENABLED else None
+    if hit:
+        roll = random.random()
+        if roll < BOOK_PLAY_PROB:
+            print(f"[BOOK] 背谱：{hit['san']}（走过 {hit['count']} 次，平均评估 {hit['avg_cp']}cp，"
+                  f"该局面 {hit['options']} 个选择）")
+            live.thinking(ply)
+            note = f"背谱：{hit['san']}（走过 {hit['count']} 次，赛后评估平均 {hit['avg_cp']}cp）"
+            obs = {"book": note}
+            live.decision(ply, move_san=hit["san"], move_uci=hit["uci"], think=note, opp_intent="",
+                          obs=obs, reasoning="", recalled=[], warnings=[], attempts=0, fallback=False)
+            return hit["uci"], note, "", obs
+        print(f"[BOOK] 局面在谱里（{hit['san']}），抽到 {roll:.2f} ≥ {BOOK_PLAY_PROB}，本步重新推理")
 
     # 我方 / 对方 颜色字符串
     my_color_str = COLOR_ZH[board.turn] + ("(WHITE)" if board.turn == chess.WHITE else "(BLACK)")

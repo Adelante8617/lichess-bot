@@ -192,6 +192,86 @@ class HangGuardTest(unittest.TestCase):
         self.assertEqual(llm._client.prompts, [])
 
 
+class BookTest(unittest.TestCase):
+    LINE = ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"]  # 白第 1、2、3 步在下标 0、2、4
+
+    def setUp(self):
+        from bot import book
+        self.book = book
+        book._book = {}
+        book.config.BOOK_PATH = os.path.join(tempfile.mkdtemp(), "book.json")
+
+    def tearDown(self):
+        self.book._book = {}  # 别让谱漏到别的用例里
+
+    def test_keepers_stop_at_first_disadvantage(self):
+        # 第 3 步（下标 4）走完评估 -150 < -100：它和之后都不入谱，前两步保留
+        evals = [(0, 20), (2, -30), (4, -150), (6, 10)]
+        self.assertEqual(self.book.keepers(evals, -100), [(0, 20), (2, -30)])
+        self.assertEqual(self.book.keepers([(0, -100)], -100), [(0, -100)])  # 恰好 -1.0 不算劣
+        self.assertEqual(self.book.keepers([(0, -101)], -100), [])
+
+    def test_record_and_lookup_with_transposition(self):
+        self.assertEqual(self.book.record_line(self.LINE, [(0, 20), (2, -30)]), 2)
+        board = chess.Board()
+        self.assertEqual(self.book.lookup(board)["uci"], "e2e4")
+        board.push_san("e4"), board.push_san("e5")
+        self.assertEqual(self.book.lookup(board)["uci"], "g1f3")
+        board.push_san("Nf3"), board.push_san("Nc6")  # 谱里到此为止（第 3 步没入谱）
+        self.assertIsNone(self.book.lookup(board))
+
+    def test_transposition_hits(self):
+        # 谱里是 1.d4 Nf6 2.c4 e6 3.Nc3；用 1.c4 Nf6 2.d4 e6 换序走到同一局面也要命中
+        line = ["d2d4", "g8f6", "c2c4", "e7e6", "b1c3"]
+        self.book.record_line(line, [(0, 10), (2, 10), (4, 10)])
+        other = chess.Board()
+        for san in ("c4", "Nf6", "d4", "e6"):
+            other.push_san(san)
+        self.assertEqual(self.book.lookup(other)["uci"], "b1c3")
+
+    def test_prefers_better_average_eval_and_persists(self):
+        self.book.record_line(["e2e4"], [(0, 10)])
+        self.book.record_line(["d2d4"], [(0, 60)])
+        self.assertEqual(self.book.lookup(chess.Board())["uci"], "d2d4")
+        self.book._save()
+        self.book._book = None  # 模拟重启后重新读盘
+        self.assertEqual(self.book.lookup(chess.Board())["uci"], "d2d4")
+
+    def test_play_probability(self):
+        self.book.record_line(["e2e4"], [(0, 10)])
+        decision = {"strategy": "x", "think": "x", "pv": ["d4"], "move": "d4"}
+        client = FakeClient(decision, [keep("d4")])
+        llm._client = client
+        original = player.random.random
+        try:
+            player.random.random = lambda: 0.59  # < 0.6：直接背谱，不调用 LLM
+            uci, think, _, obs = player.get_llm_move(chess.Board(), 1, None, None)
+            self.assertEqual(uci, "e2e4")
+            self.assertIn("背谱", think)
+            self.assertEqual(client.prompts, [])
+            player.random.random = lambda: 0.61  # ≥ 0.6：重新推理
+            uci, *_ = player.get_llm_move(chess.Board(), 1, None, None)
+            self.assertEqual(uci, "d2d4")
+            self.assertTrue(client.prompts)
+        finally:
+            player.random.random = original
+
+    def test_unseen_position_always_reasons(self):
+        self.book.record_line(["e2e4"], [(0, 10)])
+        board = chess.Board()
+        board.push_san("c4")  # 谱外局面
+        board.push_san("e5")
+        client = FakeClient({"strategy": "x", "think": "x", "pv": ["Nc3"], "move": "Nc3"}, [keep("Nc3")])
+        llm._client = client
+        original = player.random.random
+        try:
+            player.random.random = lambda: 0.0
+            uci, *_ = player.get_llm_move(board, 3, None, None)
+        finally:
+            player.random.random = original
+        self.assertEqual(uci, "b1c3")
+
+
 class ArchiveTest(unittest.TestCase):
     def test_decision_reasoning_is_saved_per_game(self):
         from bot.live import live

@@ -9,6 +9,7 @@ logger, LOG_PATH = setup_logger()
 print(f"=== Lichess LLM Bot started, log file: {LOG_PATH} ===")
 
 from bot.boardtext import build_pgn  # noqa: E402
+from bot.book import commit_opening_book  # noqa: E402
 from bot.config import STOCKFISH_PATH  # noqa: E402
 from bot.memory import (embed, experience_rag, opening_rag, seed_openings_if_empty,  # noqa: E402
                         warm_up)
@@ -21,7 +22,7 @@ warm_up()
 print(f"[RAG] openings={len(opening_rag)}  experience={len(experience_rag)}")
 
 __all__ = ["build_pgn", "STOCKFISH_PATH", "embed", "get_llm_move", "blunder_deep_review",
-           "chat_review", "commit_verified_snapshots", "post_game_review", "record_snapshot"]
+           "chat_review", "commit_opening_book", "commit_verified_snapshots", "post_game_review", "record_snapshot"]
 
 if __name__ == "__main__":
     from bot.lichess import run_lichess

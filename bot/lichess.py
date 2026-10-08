@@ -12,6 +12,7 @@ from .boardtext import build_pgn, display_san, san_history
 from .config import LICHESS_TOKEN, WAIT_TIMEOUT_SEC
 from .live import live
 from .player import fallback_move, get_llm_move
+from .book import commit_opening_book
 from .review import (blunder_deep_review, chat_review, commit_verified_snapshots,
                      post_game_review, record_snapshot)
 
@@ -208,6 +209,10 @@ def run_lichess():
                         commit_verified_snapshots(snapshots, result, my_color)
                     except Exception as e:
                         print(f"[SNAP] commit failed: {e}")
+                    try:
+                        commit_opening_book(uci_list, is_white)
+                    except Exception as e:
+                        print(f"[BOOK] commit failed: {e}")
                     live.set_status("finished", result)
                     break
 

@@ -155,6 +155,10 @@ def main():
         except Exception as e:
             print(f"[BLUNDER-REVIEW] failed: {e}")
         bot.commit_verified_snapshots(snapshots, result, my_color)
+        try:
+            bot.commit_opening_book(uci_list, my_white)
+        except Exception as e:
+            print(f"[BOOK] commit failed: {e}")
     live.set_status("finished", result)
 
 
