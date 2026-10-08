@@ -256,6 +256,13 @@ class BookTest(unittest.TestCase):
         finally:
             player.random.random = original
 
+    def test_entries_remember_how_the_position_was_reached(self):
+        self.book.record_line(self.LINE, [(0, 20), (2, -30)])
+        board = chess.Board()
+        board.push_san("e4"), board.push_san("e5")
+        moves = self.book._positions()[board.epd()]
+        self.assertIn("e4 e5", moves["g1f3"]["via"])
+
     def test_play_prob_formula(self):
         for n, want in ((1, 0.6), (2, 0.8), (3, 0.6 + 0.4 * (1 - 1 / 3)), (10, 0.96)):
             self.assertAlmostEqual(self.book.play_prob(n), want)

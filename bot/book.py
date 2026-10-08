@@ -14,6 +14,7 @@ from datetime import datetime
 import chess
 
 from . import config
+from .boardtext import san_history
 from .engine import stockfish_opening_evals
 
 _book: dict | None = None
@@ -103,6 +104,7 @@ def record_line(uci_list: list[str], kept: list[tuple[int, int]]) -> int:
             e = book.setdefault(board.epd(), {}).get(uci)
             if e is None:
                 e = book[board.epd()][uci] = {"san": board.san(chess.Move.from_uci(uci)),
+                                              "via": san_history(board),  # 首次走到该局面的着法顺序，仅供查看
                                               "count": 0, "cp_sum": 0}
                 new += 1
             e["count"] += 1
