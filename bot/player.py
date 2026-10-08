@@ -9,14 +9,15 @@ from .boardtext import (COLOR_ZH, board_meta, describe_last_move, display_san, l
                         material_lead, parse_model_move, piece_lists, render_board, san_history,
                         strip_check)
 from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, COMPLEXITY_CHECK, COMPLEXITY_DEFAULT,
-                     COMPLEXITY_PROFILE, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT, MATERIAL_LEAD_SKIP,
+                     COMPLEXITY_PROFILE, HANG_GUARD, HANG_GUARD_MIN, HANG_GUARD_ROUNDS, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT, MATERIAL_LEAD_SKIP,
                      OPENING_EFFORT, OPENING_FAST_MOVES, PLAN_MEMORY, SELF_CHECK_EFFORT,
                      SELF_CHECK_ROUNDS, STRATEGY_STAGE, STRATEGY_STAGE_MAX_TOKENS, TOOL_ROUNDS)
+from .guard import material_risk, risk_text
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
 from .memory import recall_experience
-from .prompts import (STRATEGY_STAGE_PROMPT, complexity_prompt, self_check_prompt, strategy_stage_section,
-                      system_prompt, user_prompt)
+from .prompts import (STRATEGY_STAGE_PROMPT, complexity_prompt, hang_guard_prompt, self_check_prompt,
+                      strategy_stage_section, system_prompt, user_prompt)
 from .tools import play_tools, run_tool
 
 
@@ -100,6 +101,67 @@ def self_check(board: chess.Board, messages: list, move: chess.Move,
             rec["note"] = f"自检轮数已用完，{rec['changed_to']} 未经复查"
             print(f"[SELF-CHECK] {rec['note']}")
     return current, records
+
+
+def hang_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans: list[str],
+               candidates: list[str], levels: list[str] | None = None,
+               max_tokens: int | None = None) -> tuple[chess.Move, list[dict]]:
+    """丢子守卫：程序模拟对方吃子交换，会净亏 ≥ HANG_GUARD_MIN 分时把事实交给模型复查。
+    模型能给出拿回子力的具体变化就照走；否则改选，新着法同样要过守卫。
+    轮数用完仍会丢子时，从模型自己的 candidates 里挑第一个不丢子的着法（都丢子则保持原着法）。"""
+    records: list[dict] = []
+    current = move
+    rejected: dict[chess.Move, str] = {}  # 已被查出丢子的着法 → 模拟结果
+    for rnd in range(1, HANG_GUARD_ROUNDS + 1):
+        risk = material_risk(board, current)
+        if risk["loss"] < HANG_GUARD_MIN:
+            return current, records
+        san = display_san(board, current)
+        fact = risk_text(board, current, risk)
+        print(f"[GUARD round={rnd}] {fact}")
+        live.stage(f"丢子守卫：复查 {san}")
+        rejected_view = {display_san(board, m): r for m, r in rejected.items()}
+        prompt = hang_guard_prompt(san, fact, legal_sans, rejected_view)
+        try:
+            msg, _ = llm_call(messages + [{"role": "user", "content": prompt}], levels=levels,
+                              max_tokens=max_tokens)
+        except Exception as e:
+            print(f"[GUARD] LLM failed: {e}")
+            break
+        content = (msg.content or "").strip()
+        print(f"[GUARD reply round={rnd}] {content}")
+        obj = extract_json(content) or {}
+        rec = {"round": rnd, "checked": san, "fact": fact, "loss": risk["loss"],
+               **{k: str(obj.get(k, "")) for k in ("verdict", "move", "line", "reason")}}
+        records.append(rec)
+        rejected[current] = fact
+        if rec["verdict"].strip().lower() == "keep":
+            if rec["line"].strip():
+                rec["note"] = f"模型坚持 {san}，给出的变化：{rec['line']}"
+                print(f"[GUARD] {rec['note']}")
+                return current, records
+            rec["note"] = "坚持原着法但没有给出拿回子力的变化，不予采纳"
+            break
+        new = parse_model_move(board, rec["move"])
+        if new is None or new in rejected:
+            rec["note"] = f"改选的着法无效或已被查出丢子：{rec['move']!r}"
+            break
+        rec["changed_to"] = display_san(board, new)
+        print(f"[GUARD] 改选 {san} -> {rec['changed_to']}")
+        current = new
+    if material_risk(board, current)["loss"] < HANG_GUARD_MIN:
+        return current, records
+    for text in candidates:
+        mv = parse_model_move(board, text)
+        if mv is not None and mv not in rejected and mv != current                 and material_risk(board, mv)["loss"] < HANG_GUARD_MIN:
+            note = f"复查后仍会丢子，改用候选里不丢子的 {display_san(board, mv)}"
+            break
+    else:
+        mv, note = current, "复查后仍会丢子，但候选里没有不丢子的着法，保持原着法"
+    print(f"[GUARD] {note}")
+    records.append({"round": len(records) + 1, "checked": display_san(board, current), "note": note,
+                    **({"changed_to": display_san(board, mv)} if mv != current else {})})
+    return mv, records
 
 
 def strategy_stage(board: chess.Board, messages: list) -> dict | None:
@@ -318,15 +380,27 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         mv = parse_model_move(board, cur_move)
         if mv is not None:
             chosen_san = display_san(board, mv)
-            checks: list[dict] = []
+            check_levels = cap_ladder(ladder[step:], SELF_CHECK_EFFORT)
+            guard_cands = [str(c.get("move", "")) for c in list(obs.get("candidates") or [])
+                           + (stage or {}).get("candidates", []) if isinstance(c, dict)]
+            guards: list[dict] = []
+            if HANG_GUARD:
+                mv, guards = hang_guard(board, messages, mv, legal_sans, guard_cands,
+                                        levels=check_levels, max_tokens=max_tokens)
             if SELF_CHECK_ROUNDS > 0 and not fast:
+                before = mv
                 mv, checks = self_check(board, messages, mv, legal_sans, str(obs.get("complexity", "")),
-                                        levels=cap_ladder(ladder[step:], SELF_CHECK_EFFORT),
-                                        max_tokens=max_tokens)
+                                        levels=check_levels, max_tokens=max_tokens)
                 obs["self_check"] = checks
-                if display_san(board, mv) != chosen_san:
-                    warnings.append(f"自检后改选：{chosen_san} → {display_san(board, mv)}")
-                    obs["pv"] = []  # 原主变基于旧着法，已失效
+                if HANG_GUARD and mv != before:  # 自检改出来的着法同样要过丢子守卫
+                    mv, more = hang_guard(board, messages, mv, legal_sans, guard_cands,
+                                          levels=check_levels, max_tokens=max_tokens)
+                    guards += more
+            if guards:
+                obs["guard"] = guards
+            if display_san(board, mv) != chosen_san:
+                warnings.append(f"落子前复查后改选：{chosen_san} → {display_san(board, mv)}")
+                obs["pv"] = []  # 原主变基于旧着法，已失效
             if PLAN_MEMORY and obs.get("strategy"):
                 _plans[board.turn] = ([m.uci() for m in board.move_stack] + [mv.uci()], obs["strategy"])
             live.decision(ply, move_san=display_san(board, mv), move_uci=mv.uci(),

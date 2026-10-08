@@ -81,6 +81,12 @@ MATERIAL_LEAD_EFFORT = os.getenv("MATERIAL_LEAD_EFFORT", "low").strip().lower()
 # 每步自动召回的经验条数；设为 0 关闭自动召回（只保留模型主动调用 search_experience）
 AUTO_RECALL_K = int(os.getenv("AUTO_RECALL_K", "3"))
 SELF_CHECK_ROUNDS = int(os.getenv("SELF_CHECK_ROUNDS", "2"))   # 0 关闭落子前自检
+# 丢子守卫：落子前按规则模拟对方的吃子交换（SEE），会净亏 ≥ HANG_GUARD_MIN 分时把模拟结果交给模型复查；
+# 模型改选后再查新着法，最多 HANG_GUARD_ROUNDS 轮。轮数用完仍会丢子、模型又给不出拿回子力的具体变化时，
+# 改用模型自己候选里不丢子的那个（没有则保持原着法）。这是对局中唯一由程序计算的检查
+HANG_GUARD = os.getenv("HANG_GUARD", "1") == "1"
+HANG_GUARD_MIN = int(os.getenv("HANG_GUARD_MIN", "2"))      # 默认 2：放过弃一兵的开局弃兵
+HANG_GUARD_ROUNDS = int(os.getenv("HANG_GUARD_ROUNDS", "2"))
 # 自检的思考档位上限：决策档位高于它时，自检降到该档（空 = 不封顶，沿用决策档位）
 SELF_CHECK_EFFORT = os.getenv("SELF_CHECK_EFFORT", "low").strip().lower()
 

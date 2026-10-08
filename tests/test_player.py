@@ -16,11 +16,12 @@ os.chdir(tempfile.mkdtemp(prefix="lichess-bot-test-"))
 # 钉死开关，不受本机 .env 影响（load_dotenv 不覆盖已存在的环境变量）
 os.environ.update({"AUTO_RECALL_K": "0", "SELF_CHECK_ROUNDS": "2", "OPENING_FAST_MOVES": "0",
                    "COMPLEXITY_CHECK": "1", "THINK_LADDER": "default", "MATERIAL_LEAD_SKIP": "12",
-                   "BOARD_RELATIONS": "0", "ANALYSIS_BOARD": "0", "PLAN_MEMORY": "1"})
+                   "BOARD_RELATIONS": "0", "ANALYSIS_BOARD": "0", "PLAN_MEMORY": "1",
+                   "HANG_GUARD": "1", "HANG_GUARD_MIN": "2", "HANG_GUARD_ROUNDS": "2"})
 
 import chess  # noqa: E402
 
-from bot import llm, player  # noqa: E402
+from bot import guard, llm, player  # noqa: E402
 
 
 def _msg(content: str, finish: str = "stop"):
@@ -32,9 +33,11 @@ def _msg(content: str, finish: str = "stop"):
 class FakeClient:
     """按提示词种类返回预设回答；self_check_replies 依次用于每轮自检。"""
 
-    def __init__(self, decision: dict, self_check_replies: list[dict], complexity="medium"):
+    def __init__(self, decision: dict, self_check_replies: list[dict], complexity="medium",
+                 guard_replies: list[dict] | None = None):
         self.decision = decision
         self.self_check_replies = list(self_check_replies)
+        self.guard_replies = list(guard_replies or [])
         self.complexity = complexity
         self.prompts: list[str] = []
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
@@ -44,6 +47,8 @@ class FakeClient:
         self.prompts.append(last)
         if "只判断当前局面的复杂度" in last:
             return _msg(json.dumps({"complexity": self.complexity, "reason": "测试"}, ensure_ascii=False))
+        if "程序按规则模拟了对方的吃子交换" in last:
+            return _msg(json.dumps(self.guard_replies.pop(0), ensure_ascii=False))
         if "落子前" in last and "复查" in last:
             return _msg(json.dumps(self.self_check_replies.pop(0), ensure_ascii=False))
         return _msg(json.dumps(self.decision, ensure_ascii=False))
@@ -93,7 +98,81 @@ class SelfCheckTest(unittest.TestCase):
         self.assertIn("未经复查", records[-1].get("note", ""))
 
 
+# 日志 20261008_110636 的 ply 21：白方走 Bg5，被 h6 黑兵直接吃掉
+PLY21 = "r1bq1rk1/1p3pp1/p1nbpn1p/3p4/3P4/2NBBN2/PPP2PPP/R2QR1K1 w - - 0 11"
+
+
+class MaterialRiskTest(unittest.TestCase):
+    def risk(self, fen, san):
+        board = chess.Board(fen)
+        return guard.material_risk(board, board.parse_san(san))
+
+    def test_piece_to_pawn_controlled_square(self):
+        r = self.risk(PLY21, "Bg5")
+        self.assertEqual(r["loss"], 2)  # hxg5 Nxg5：象换兵
+        self.assertEqual(r["line"], ["hxg5", "Nxg5"])
+
+    def test_safe_moves(self):
+        for san in ("Re2", "Qd2", "Be2"):
+            self.assertLessEqual(self.risk(PLY21, san)["loss"], 0, san)
+
+    def test_capture_of_defended_pawn(self):
+        self.assertEqual(self.risk(PLY21, "Bxh6")["loss"], 2)
+
+    def test_favorable_capture_not_flagged(self):
+        # 兵吃马、马再吃回：净赚 2，不算丢子
+        board = chess.Board("4k3/8/8/3n4/4P3/8/8/4K3 w - - 0 1")
+        self.assertLess(guard.material_risk(board, board.parse_san("exd5"))["loss"], 0)
+
+
+class HangGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.board = chess.Board(PLY21)
+        self.legal = list(player.legal_san_map(self.board))
+
+    def run_guard(self, replies, candidates=("Bg5", "Re2")):
+        llm._client = FakeClient({}, [], guard_replies=replies)
+        mv, records = player.hang_guard(self.board, [], self.board.parse_san("Bg5"), self.legal,
+                                        list(candidates))
+        return self.board.san(mv), records, llm._client
+
+    def test_change_to_safe_move(self):
+        san, records, client = self.run_guard([change("Re2")])
+        self.assertEqual(san, "Re2")
+        self.assertIn("hxg5", client.prompts[0])  # 模拟出的交换序列交给模型
+
+    def test_keep_with_line_is_accepted(self):
+        san, records, _ = self.run_guard([{"verdict": "keep", "move": "Bg5", "line": "hxg5 Nxg5 ...",
+                                           "reason": "能拿回"}])
+        self.assertEqual(san, "Bg5")
+
+    def test_keep_without_line_falls_back_to_safe_candidate(self):
+        san, records, _ = self.run_guard([keep("Bg5")])
+        self.assertEqual(san, "Re2")
+        self.assertIn("不丢子", records[-1]["note"])
+
+    def test_change_to_another_hanging_move_is_rechecked(self):
+        san, records, client = self.run_guard([change("Bf4"), change("Bg5")], candidates=["Qd2"])
+        self.assertEqual(san, "Qd2")  # Bf4 也丢象，想改回 Bg5 被拒，最后用候选里安全的 Qd2
+        self.assertIn("Bg5", client.prompts[1])  # 第二轮提示里列出已查出丢子的 Bg5
+
+    def test_no_llm_call_for_safe_move(self):
+        llm._client = FakeClient({}, [])
+        mv, records = player.hang_guard(self.board, [], self.board.parse_san("Re2"), self.legal, [])
+        self.assertEqual(records, [])
+        self.assertEqual(llm._client.prompts, [])
+
+
 class GetMoveTest(unittest.TestCase):
+    def test_guard_runs_in_full_flow(self):
+        board = chess.Board(PLY21)
+        decision = {"strategy": "x", "candidates": [{"move": "Bg5"}, {"move": "Re2"}], "think": "x",
+                    "pv": ["Bg5"], "move": "Bg5"}
+        llm._client = FakeClient(decision, [keep("Re2")], guard_replies=[change("Re2")])
+        uci, _, _, obs = player.get_llm_move(board, 21, None, None)
+        self.assertEqual(uci, "e1e2")
+        self.assertEqual(obs["guard"][0]["changed_to"], "Re2")
+
     def test_full_flow(self):
         board = chess.Board()
         decision = {"strategy": "抢占中心", "candidates": [{"move": "e4"}], "think": "x",

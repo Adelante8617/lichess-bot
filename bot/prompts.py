@@ -53,6 +53,8 @@ SYSTEM_PROMPT = """你是一个国际象棋 AI。每一步按下面的流程思�
     这类以小换大的吃子是重要的候选，不要因为"会被吃回"就放弃。
   · 用高价值子吃被保护的低价值子是亏的：象吃被兵保护的兵 = 3 换 1。吃子前必须确认对方能不能吃回、吃回之后谁赚。
   · 同理，我方高价值子被对方低价值子攻击时，即使有保护也要处理（被吃后吃回仍然亏）；对方高价值子被我方低价值子攻击，就是我的机会。
+- 兵只能斜着向前吃子：白兵向第 8 横排方向走，吃左前 / 右前一格（e4 兵控制 d5、f5）；
+  黑兵向第 1 横排方向走，吃左下 / 右下一格（h6 黑兵控制 g5，b7 黑兵控制 a6、c6）。把子走到对方兵控制的格上，就是送给兵吃。
 - 不做未经验证的弃子：只有在算清楚能拿回子力、能将杀、或获得决定性优势时才弃子；
   "争取主动""打开线路""制造威胁"这类模糊理由不算。
 - 已经落后时，更要避免连续冒险；先稳住局面，不要孤注一掷。子力领先时，兑子简化通常是好方针。
@@ -229,6 +231,27 @@ STRATEGY_STAGE_PROMPT = """先不要选着，也不要计算变化。只完成�
 严格输出 JSON（不要 markdown）：
 {"opp_intent": "≤40 字", "urgent": "≤60 字，没有写 无", "strategy": "≤60 字",
  "candidates": [{"move": "SAN", "purpose": "应对威胁/战术机会/推进方针", "idea": "≤30 字"}]}"""
+
+
+def hang_guard_prompt(san: str, fact: str, legal_sans: list[str], rejected: dict[str, str]) -> str:
+    """丢子守卫：程序模拟出会净亏子力时，把事实交给模型复查。rejected：已被守卫查出丢子的着法。"""
+    rejected_section = ""
+    if rejected:
+        lines = "\n".join(f"- {m}：{r}" for m, r in rejected.items())
+        rejected_section = f"\n下面的着法同样已被查出会丢子，不要改回它们：\n{lines}\n"
+    return f"""落子前复查：程序按规则模拟了对方的吃子交换（这是规则层面的事实，不会算错）：
+{fact}
+{rejected_section}
+只有两种情况可以坚持 {san}：
+- 你能写出一条具体变化，证明丢掉的子能拿回来、或能将杀、或能吃到更多子力；
+- 对方吃子之后，我方有更强的手段（如将军抽子、捉双）是上面的简单交换没有算到的。
+"争取主动""打开线路"这类理由不算。否则改选一个不丢子的着法，优先从你刚才的候选里挑，
+必须来自合法走法列表：
+{", ".join(legal_sans)}
+
+严格输出 JSON（不要 markdown）：
+{{"verdict": "keep 或 change", "move": "keep 时填 {san}；change 时填新着法",
+ "line": "keep 时必填：拿回子力的具体变化（SAN 序列）；change 时留空", "reason": "≤60 字"}}"""
 
 
 def strategy_stage_section(urgent: str, strategy: str, candidates: list[dict]) -> str:
