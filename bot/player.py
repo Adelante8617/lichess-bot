@@ -1,5 +1,6 @@
 """对局阶段的决策：复杂度分流 → LLM 选着（可调工具）→ 落子前自检 → 非法着法重试 / 保底。"""
 import json
+from concurrent.futures import ThreadPoolExecutor
 import random
 
 import chess
@@ -281,6 +282,9 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
 
     live.thinking(ply)
     fast = is_opening_fast(board, prev_board, opp_last_move)
+    # 经验召回要做一次 embedding，与复杂度判断的 LLM 调用互不依赖，并行跑
+    recall_pool = ThreadPoolExecutor(max_workers=1)
+    recall_future = None if fast else recall_pool.submit(recall_experience, board)
     # 本步复杂度 → 起始思考档位与 max_tokens
     complexity, complexity_reason = "", ""
     if fast:
@@ -303,7 +307,8 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         print(f"[COMPLEXITY] {complexity}（{complexity_reason}）-> effort={start}, max_tokens={max_tokens}")
     else:
         ladder, max_tokens = think_ladder(), LLM_MAX_TOKENS
-    recalled = [] if fast else recall_experience(board)
+    recalled = recall_future.result() if recall_future else []
+    recall_pool.shutdown(wait=False)
     if recalled:
         recall_section = "\n".join(f"- {h['text']}" for h in recalled)
         print(f"[RECALL] {len(recalled)} 条: " + " | ".join(h["text"][:40] for h in recalled))
@@ -342,7 +347,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         for rnd in range(TOOL_ROUNDS):  # 单轮内最多 TOOL_ROUNDS 次 tool 往返
             # 开分析棋盘时，最后一轮不再提供工具，逼模型给出最终答案
             last_round = ANALYSIS_BOARD and rnd == TOOL_ROUNDS - 1
-            msg, level = llm_call(messages, tools=None if last_round else play_tools(),
+            msg, level = llm_call(messages, tools=None if last_round or fast else play_tools(),
                                   levels=ladder[step:], max_tokens=max_tokens)
             step = ladder.index(level)  # 若本轮因截断降了档，后续沿用降后的档位
             if msg.tool_calls:

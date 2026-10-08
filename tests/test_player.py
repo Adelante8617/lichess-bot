@@ -44,6 +44,7 @@ class FakeClient:
 
     def _create(self, **kw):
         last = kw["messages"][-1]["content"]
+        self.kwargs = getattr(self, "kwargs", []) + [kw]
         self.prompts.append(last)
         if "只判断当前局面的复杂度" in last:
             return _msg(json.dumps({"complexity": self.complexity, "reason": "测试"}, ensure_ascii=False))
@@ -262,6 +263,23 @@ class GetMoveTest(unittest.TestCase):
         decision_prompt = next(p for p in client.prompts if "【当前局面，轮到你走】" in p)
         self.assertIn("第一阶段已定下的结论", decision_prompt)
         self.assertNotIn("- Ke2", decision_prompt)  # 非法候选被过滤
+
+    def test_opening_fast_mode_offers_no_tools_and_skips_recall(self):
+        decision = {"strategy": "抢中心", "think": "x", "pv": ["e4"], "move": "e4"}
+        client = FakeClient(decision, [])
+        llm._client = client
+        player.OPENING_FAST_MOVES = 8
+        calls = []
+        original = player.recall_experience
+        player.recall_experience = lambda b: calls.append(1) or []
+        try:
+            uci, *_ = player.get_llm_move(chess.Board(), 1, None, None)
+        finally:
+            player.OPENING_FAST_MOVES = 0
+            player.recall_experience = original
+        self.assertEqual(uci, "e2e4")
+        self.assertEqual(calls, [])
+        self.assertTrue(all("tools" not in kw for kw in client.kwargs))
 
     def test_illegal_then_fallback(self):
         board = chess.Board()

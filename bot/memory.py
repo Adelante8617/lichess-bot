@@ -1,4 +1,6 @@
 """RAG：开局库 + 经验记忆库，以及每步的经验自动召回。"""
+import threading
+
 import chess
 from openai import OpenAI
 
@@ -27,6 +29,17 @@ def embed(text: str):
 
 opening_rag = RAGStore("data/openings.jsonl", embed)
 experience_rag = RAGStore("data/experience.jsonl", embed)
+
+
+def warm_up():
+    """后台预热 embedding（本地模型首次加载要十几秒）：启动时就加载，不让第一步召回卡住对局。"""
+    def _run():
+        try:
+            embed("warm up")
+        except Exception as e:
+            print(f"[EMBED] warm-up failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def seed_openings_if_empty():
