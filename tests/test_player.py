@@ -270,61 +270,70 @@ class BookTest(unittest.TestCase):
         # 评估恰好为 0 仍按原公式
         self.assertAlmostEqual(self.book.play_prob(1, 0), 0.6)
 
-    def test_play_prob_negative_eval_encourages_new_moves(self):
-        self.assertAlmostEqual(self.book.play_prob(1, -30), 0.0)   # 刚入谱：一定重新推理
-        self.assertAlmostEqual(self.book.play_prob(2, -30), 0.1)
-        self.assertAlmostEqual(self.book.play_prob(5, -1), 0.2 * (1 - 1 / 5))
-        self.assertLess(self.book.play_prob(1000, -30), 0.2)
+    def test_play_prob_negative_eval(self):
+        # -1.0 兵 ≤ 评分 < 0：0.2/(n+1)，被选得越多越少背
+        self.assertAlmostEqual(self.book.play_prob(1, -30), 0.1)
+        self.assertAlmostEqual(self.book.play_prob(3, -30), 0.05)
+        self.assertGreater(self.book.play_prob(1, -30), self.book.play_prob(9, -30))
+        # 评分低于下限（-100cp）的是错棋记录，不背
+        self.assertEqual(self.book.play_prob(1, -150), 0.0)
 
-    def test_negative_eval_move_is_never_replayed_at_n1(self):
-        self.book.record_line(["e2e4"], [(0, -50)])  # 平均评估 -0.5：负分着法
+    def test_negative_eval_move_replays_with_small_probability(self):
+        self.book.record_line(["e2e4"], [(0, -50)])  # 平均评估 -0.5：n=1 时概率 0.1
         client = FakeClient({"strategy": "x", "think": "x", "pv": ["d4"], "move": "d4"}, [keep("d4")])
         llm._client = client
         original = player.random.random
         try:
-            player.random.random = lambda: 0.0  # 抽得再小，n=1 的负分着法也不照走
+            player.random.random = lambda: 0.05
             uci, *_ = player.get_llm_move(chess.Board(), 1, None, None)
-        finally:
-            player.random.random = original
-        self.assertEqual(uci, "d2d4")
-        self.assertTrue(client.prompts)
-
-    def test_reasoning_that_repeats_book_move_raises_confirmation(self):
-        self.book.record_line(["e2e4"], [(0, 10)])
-        self.assertEqual(self.book.lookup(chess.Board())["n"], 1)
-        client = FakeClient({"strategy": "x", "think": "x", "pv": ["e4"], "move": "e4"}, [keep("e4")])
-        llm._client = client
-        original = player.random.random
-        try:
-            player.random.random = lambda: 0.99  # 一定重新推理
-            uci, _, _, obs = player.get_llm_move(chess.Board(), 1, None, None)
             self.assertEqual(uci, "e2e4")
-            self.assertEqual(self.book.lookup(chess.Board())["n"], 2)
-            self.assertIn("确认次数 2", obs["book"])
-            # n=2 时照走概率 0.8：0.79 背谱（不再调用 LLM），0.81 仍要重新推理
-            calls = len(client.prompts)
-            player.random.random = lambda: 0.79
-            player.get_llm_move(chess.Board(), 1, None, None)
-            self.assertEqual(len(client.prompts), calls)
-            player.random.random = lambda: 0.81
-            player.get_llm_move(chess.Board(), 1, None, None)
-            self.assertGreater(len(client.prompts), calls)
-            self.assertEqual(self.book.lookup(chess.Board())["n"], 3)
+            self.assertEqual(client.prompts, [])
+            player.random.random = lambda: 0.15
+            uci, *_ = player.get_llm_move(chess.Board(), 1, None, None)
+            self.assertEqual(uci, "d2d4")
         finally:
             player.random.random = original
 
-    def test_different_move_does_not_confirm(self):
-        self.book.record_line(["e2e4"], [(0, 10)])
+    def test_first_bad_move_is_recorded_as_warning_not_replayed(self):
+        evals = [(0, 20), (2, -250), (4, 50)]
+        bad = self.book.faulty(evals, -100)
+        self.assertEqual(bad, (2, -250))
+        self.book.record_line(self.LINE, self.book.keepers(evals, -100) + [bad])
+        board = chess.Board()
+        board.push_san("e4"), board.push_san("e5")
+        self.assertIsNone(self.book.lookup(board))  # 只有错棋记录：不背
+        warn = self.book.warnings(board)
+        self.assertEqual([(w["san"], w["n"], round(w["avg_cp"])) for w in warn], [("Nf3", 1, -250)])
+
+    def test_warnings_show_three_lowest(self):
+        for uci, cp in (("e2e4", -20), ("d2d4", -300), ("g1f3", -90), ("c2c4", -150), ("b1c3", 40)):
+            self.book.record_line([uci], [(0, cp)])
+        warn = self.book.warnings(chess.Board())
+        self.assertEqual([w["san"] for w in warn], ["d4", "c4", "Nf3"])  # 评分最低的三个，正分的不提醒
+
+    def test_best_move_chosen_and_ties_are_random(self):
+        for uci, cp in (("e2e4", 30), ("d2d4", 30), ("g1f3", 10)):
+            self.book.record_line([uci], [(0, cp)])
+        seen = {self.book.lookup(chess.Board())["uci"] for _ in range(60)}
+        self.assertEqual(seen, {"e2e4", "d2d4"})  # 并列最高随机，评分更低的 Nf3 从不被选
+        # 次数多不影响：e4 记过三次也不压过同分的 d4
+        self.book.record_line(["e2e4"], [(0, 30)])
+        self.book.record_line(["e2e4"], [(0, 30)])
+        seen = {self.book.lookup(chess.Board())["uci"] for _ in range(60)}
+        self.assertEqual(seen, {"e2e4", "d2d4"})
+
+    def test_warning_is_in_decision_prompt(self):
+        self.book.record_line(["e2e4"], [(0, -250)])
+        self.book._positions()[chess.Board().epd()]["e2e4"]["confirm"] = 2  # 共选过 3 次
         client = FakeClient({"strategy": "x", "think": "x", "pv": ["d4"], "move": "d4"}, [keep("d4")])
         llm._client = client
-        original = player.random.random
-        try:
-            player.random.random = lambda: 0.99
-            uci, *_ = player.get_llm_move(chess.Board(), 1, None, None)
-        finally:
-            player.random.random = original
+        uci, _, _, obs = player.get_llm_move(chess.Board(), 1, None, None)
         self.assertEqual(uci, "d2d4")
-        self.assertEqual(self.book.lookup(chess.Board())["n"], 1)
+        prompt = next(p for p in client.prompts if "【当前局面，轮到你走】" in p)
+        self.assertIn("历史上在这个局面已经选择过 3 次", prompt)
+        self.assertIn("-2.50", prompt)
+        self.assertIn("谨慎", prompt)
+        self.assertTrue(obs["book_warning"])
 
     def test_unseen_position_always_reasons(self):
         self.book.record_line(["e2e4"], [(0, 10)])

@@ -20,8 +20,9 @@ from .guard import material_risk, risk_text, verify_line
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
 from .memory import recall_experience
-from .prompts import (STRATEGY_STAGE_PROMPT, complexity_prompt, hang_guard_prompt, self_check_prompt,
-                      strategy_stage_section, system_prompt, user_prompt)
+from .prompts import (STRATEGY_STAGE_PROMPT, book_warning_section, complexity_prompt,
+                      hang_guard_prompt, self_check_prompt, strategy_stage_section, system_prompt,
+                      user_prompt)
 from .tools import play_tools, run_tool
 
 
@@ -345,6 +346,12 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         {"role": "system", "content": system_prompt()},
         {"role": "user", "content": prompt},
     ]
+    # 谱里记着这个局面下评分偏低的着法：先附上，第一阶段和决策阶段都能看到（开局快速模式也一样）
+    book_warn = book.warnings(board) if BOOK_ENABLED else []
+    if book_warn:
+        messages[1]["content"] += book_warning_section(book_warn)
+        print("[BOOK] 提醒：" + "；".join(f"{w['san']}（选过 {w['n']} 次，评分 {w['avg_cp'] / 100:+.2f}）"
+                                          for w in book_warn))
     stage = strategy_stage(board, messages) if STRATEGY_STAGE and not fast else None
     if stage:
         # 附在 user 提示末尾（而不是新增消息），非法着法重试时保留的 messages[:2] 里也有它
@@ -451,7 +458,13 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
                 obs["pv"] = []  # 原主变基于旧着法，已失效
             if PLAN_MEMORY and obs.get("strategy"):
                 _plans[board.turn] = ([m.uci() for m in board.move_stack] + [mv.uci()], obs["strategy"])
-            if hit:  # 重新推理的结果恰好是谱里已有的着法：确认次数 +1，下次更倾向直接背
+            if book_warn:
+                obs["book_warning"] = [f"{w['san']}：选过 {w['n']} 次，评分 {w['avg_cp'] / 100:+.2f}"
+                                       for w in book_warn]
+            n_bad = next((w["n"] for w in book_warn if w["san"] == display_san(board, mv)), 0)
+            if n_bad:
+                warnings.append(f"选了谱里提醒过的 {display_san(board, mv)}（历史上选过 {n_bad} 次）")
+            if BOOK_ENABLED:  # 重新推理的结果恰好是谱里已有的着法：确认次数 +1，下次更倾向直接背
                 n = book.confirm(board, mv.uci())
                 if n:
                     obs["book"] = f"重新推理后仍选谱里的 {display_san(board, mv)}，确认次数 {n}"

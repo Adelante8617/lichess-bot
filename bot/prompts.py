@@ -264,6 +264,20 @@ def hang_guard_prompt(san: str, fact: str, legal_sans: list[str], rejected: dict
  "line": "tactical 时填对方吃子之后的具体变化（SAN 序列），否则留空", "reason": "≤80 字"}}"""
 
 
+def book_warning_section(items: list[dict]) -> str:
+    """谱里记着的、这个局面下评分偏低的着法（最多三个，评分最低的）。只陈述历史数据，不替模型下结论。"""
+    lines = "\n".join(f"- {it['san']}：历史上在这个局面已经选择过 {it['n']} 次，"
+                      f"脱谱时赛后 Stockfish 评分 {it['avg_cp'] / 100:+.2f}（我方视角，单位兵，负数表示我方处于下风）"
+                      for it in items)
+    return f"""
+
+==== 这个局面的历史记录（来自你以前的对局）====
+下面这些着法你在这个局面里走过，赛后评估的结果偏低：
+{lines}
+这是历史数据，仅供参考，当前局面可能有不同之处。选择这几步之前请谨慎，先想清楚当时为什么没有走好；
+如果你仍然选择其中一步，请在 think 里写明这次与当时的不同之处。"""
+
+
 def strategy_stage_section(urgent: str, strategy: str, candidates: list[dict]) -> str:
     """把第一阶段的结论附到决策 prompt 后面，限定第二阶段只算这些候选。"""
     lines = "\n".join(f"- {c['move']}（{c.get('purpose', '')}）：{c.get('idea', '')}" for c in candidates)

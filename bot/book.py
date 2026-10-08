@@ -9,6 +9,7 @@
 """
 import json
 import os
+import random
 from datetime import datetime
 
 import chess
@@ -43,36 +44,51 @@ def _save():
     os.replace(tmp, config.BOOK_PATH)
 
 
-def lookup(board: chess.Board) -> dict | None:
-    """当前局面在谱里就返回 {"uci","san","count","avg_cp","options"}：多个着法时取平均评估最高的
-    （并列取次数多的），只考虑当前合法的着法；不在谱里返回 None。"""
-    moves = _positions().get(board.epd())
-    if not moves:
-        return None
-    best, best_key = None, None
-    for uci, e in moves.items():
+def _entries(board: chess.Board) -> list[dict]:
+    """当前局面在谱里记过的、现在合法的着法，每项 {"uci","san","count","avg_cp","n"}。"""
+    out = []
+    for uci, e in _positions().get(board.epd(), {}).items():
         try:
             if chess.Move.from_uci(uci) not in board.legal_moves:
                 continue
         except ValueError:
             continue
-        key = (e["cp_sum"] / e["count"], e["count"])
-        if best_key is None or key > best_key:
-            best_key = key
-            best = {"uci": uci, "san": e["san"], "count": e["count"], "avg_cp": key[0],
-                    "n": 1 + e.get("confirm", 0), "options": len(moves)}
-    return best
+        out.append({"uci": uci, "san": e["san"], "count": e["count"], "avg_cp": e["cp_sum"] / e["count"],
+                    "n": 1 + e.get("confirm", 0)})
+    return out
+
+
+def lookup(board: chess.Board) -> dict | None:
+    """当前局面在谱里有可背的着法就返回 {"uci","san","count","avg_cp","n","options"}：
+    必定取赛后评估平均最高的，评估相同（差不到 0.01 兵）就在它们之中随机选一个。
+    评估平均低于 BOOK_FLOOR_CP 的着法是"错棋记录"，只用来提醒，不会被背；没有可背的返回 None。"""
+    entries = _entries(board)
+    playable = [e for e in entries if e["avg_cp"] >= config.BOOK_FLOOR_CP]
+    if not playable:
+        return None
+    top = max(e["avg_cp"] for e in playable)
+    best = random.choice([e for e in playable if top - e["avg_cp"] < 1])
+    return dict(best, options=len(entries))
+
+
+def warnings(board: chess.Board, k: int = 3) -> list[dict]:
+    """当前局面谱里评估平均为负的着法中最低的 k 个（含不会被背的错棋记录），按评分从低到高。"""
+    bad = [e for e in _entries(board) if e["avg_cp"] < 0]
+    return sorted(bad, key=lambda e: e["avg_cp"])[:k]
 
 
 def play_prob(n: int, avg_cp: float = 0) -> float:
     """命中谱时直接照走的概率。n = 这一步被选中的次数（入谱算 1 次，之后每次重新推理又选了它加 1）。
     - 赛后评估平均 ≥ 0：BOOK_PLAY_PROB + (1 - BOOK_PLAY_PROB) * (1 - 1/n)，
       n=1 即基础概率（默认 0.6），n 越大越趋近 1，省得对反复确认的着法重复推理；
-    - 平均 < 0（这步让我方略处下风）：BOOK_NEG_PLAY_MAX * (1 - 1/n)（默认上限 0.2），
-      n=1 时为 0，一定重新推理，鼓励尝试新棋，少重复会造成劣势的局面。"""
+    - -1.0 兵 ≤ 平均 < 0（这步让我方略处下风）：BOOK_NEG_PLAY_PROB / (n + 1)（默认 0.2），
+      越是反复选到越少背，错棋尽量少选；
+    - 平均 < BOOK_FLOOR_CP：0，只做提醒，不背。"""
     n = max(1, n)
+    if avg_cp < config.BOOK_FLOOR_CP:
+        return 0.0
     if avg_cp < 0:
-        return config.BOOK_NEG_PLAY_MAX * (1 - 1 / n)
+        return config.BOOK_NEG_PLAY_PROB / (n + 1)
     base = config.BOOK_PLAY_PROB
     return base + (1 - base) * (1 - 1 / n)
 
@@ -98,6 +114,11 @@ def keepers(evals: list[tuple[int, int]], floor_cp: int) -> list[tuple[int, int]
     return out
 
 
+def faulty(evals: list[tuple[int, int]], floor_cp: int) -> tuple[int, int] | None:
+    """第一个评估低于 floor_cp 的着法（让局面由可接受变成劣势的那一步），没有则 None。"""
+    return next((item for item in evals if item[1] < floor_cp), None)
+
+
 def record_line(uci_list: list[str], kept: list[tuple[int, int]]) -> int:
     """把 kept 里的着法并入谱（局面取走这步之前的），返回新增的（局面, 着法）条数。"""
     book = _positions()
@@ -120,17 +141,19 @@ def record_line(uci_list: list[str], kept: list[tuple[int, int]]) -> int:
 
 
 def commit_opening_book(uci_list: list[str], my_white: bool):
-    """赛后调用：评估开局、把没变差的部分并入谱并存盘。"""
+    """赛后调用：评估开局，没变差的部分并入谱；第一个让评估低于下限的那步也记下来（只做提醒，不会被背），
+    之后的着法不记。存盘。"""
     if not config.BOOK_ENABLED or not uci_list:
         return
     evals = stockfish_opening_evals(uci_list, my_white, config.BOOK_MAX_MOVES, config.BOOK_FLOOR_CP)
     kept = keepers(evals, config.BOOK_FLOOR_CP)
-    if not kept:
-        print(f"[BOOK] 本局没有可入谱的着法（评估 {len(evals)} 步）")
+    bad = faulty(evals, config.BOOK_FLOOR_CP)
+    if not kept and not bad:
+        print(f"[BOOK] 本局没有可记录的着法（评估 {len(evals)} 步）")
         return
-    new = record_line(uci_list, kept)
+    new = record_line(uci_list, kept + ([bad] if bad else []))
     _save()
-    stopped = len(kept) < len(evals)
     print(f"[BOOK] 入谱 {len(kept)} 步（新增 {new}），"
-          + (f"第 {len(kept) + 1} 步后评估低于 {config.BOOK_FLOOR_CP}cp，之后不入谱" if stopped else "未出现劣势")
+          + (f"第 {len(kept) + 1} 步评估 {bad[1]}cp 低于 {config.BOOK_FLOOR_CP}cp，记为错棋提醒，之后不记"
+             if bad else "未出现劣势")
           + f"；谱内共 {len(_positions())} 个局面")
