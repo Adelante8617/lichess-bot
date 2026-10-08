@@ -10,7 +10,7 @@ from .archive import log_reasoning
 from .boardtext import (COLOR_ZH, board_meta, describe_last_move, display_san, legal_san_map,
                         material_lead, parse_model_move, piece_lists, render_board, san_history,
                         strip_check)
-from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, BOOK_ENABLED, BOOK_PLAY_PROB, COMPLEXITY_CHECK,
+from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, BOOK_ENABLED, COMPLEXITY_CHECK,
                      COMPLEXITY_DEFAULT, COMPLEXITY_PROFILE, HANG_GUARD, HANG_GUARD_MIN,
                      HANG_GUARD_POSITIONAL, HANG_GUARD_ROUNDS, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT,
                      MATERIAL_LEAD_SKIP, OPENING_EFFORT, OPENING_FAST_MOVES, PLAN_MEMORY,
@@ -272,17 +272,19 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
     # 背谱：当前局面在谱里时，按概率直接照走；否则（或抽到重新推理）走正常流程
     hit = book.lookup(board) if BOOK_ENABLED else None
     if hit:
+        # 重新推理后又选了这一步的次数越多（n），越可信，越不必再花时间重复推理
+        prob = book.play_prob(hit["n"])
         roll = random.random()
-        if roll < BOOK_PLAY_PROB:
-            print(f"[BOOK] 背谱：{hit['san']}（走过 {hit['count']} 次，平均评估 {hit['avg_cp']}cp，"
-                  f"该局面 {hit['options']} 个选择）")
+        if roll < prob:
+            print(f"[BOOK] 背谱：{hit['san']}（确认 {hit['n']} 次，照走概率 {prob:.2f}；"
+                  f"入谱 {hit['count']} 次，平均评估 {hit['avg_cp']}cp，该局面 {hit['options']} 个选择）")
             live.thinking(ply)
-            note = f"背谱：{hit['san']}（走过 {hit['count']} 次，赛后评估平均 {hit['avg_cp']}cp）"
+            note = f"背谱：{hit['san']}（确认 {hit['n']} 次，照走概率 {prob:.2f}，赛后评估平均 {hit['avg_cp']}cp）"
             obs = {"book": note}
             live.decision(ply, move_san=hit["san"], move_uci=hit["uci"], think=note, opp_intent="",
                           obs=obs, reasoning="", recalled=[], warnings=[], attempts=0, fallback=False)
             return hit["uci"], note, "", obs
-        print(f"[BOOK] 局面在谱里（{hit['san']}），抽到 {roll:.2f} ≥ {BOOK_PLAY_PROB}，本步重新推理")
+        print(f"[BOOK] 局面在谱里（{hit['san']}，确认 {hit['n']} 次），抽到 {roll:.2f} ≥ {prob:.2f}，本步重新推理")
 
     # 我方 / 对方 颜色字符串
     my_color_str = COLOR_ZH[board.turn] + ("(WHITE)" if board.turn == chess.WHITE else "(BLACK)")
@@ -449,6 +451,11 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
                 obs["pv"] = []  # 原主变基于旧着法，已失效
             if PLAN_MEMORY and obs.get("strategy"):
                 _plans[board.turn] = ([m.uci() for m in board.move_stack] + [mv.uci()], obs["strategy"])
+            if hit:  # 重新推理的结果恰好是谱里已有的着法：确认次数 +1，下次更倾向直接背
+                n = book.confirm(board, mv.uci())
+                if n:
+                    obs["book"] = f"重新推理后仍选谱里的 {display_san(board, mv)}，确认次数 {n}"
+                    print(f"[BOOK] {obs['book']}")
             live.decision(ply, move_san=display_san(board, mv), move_uci=mv.uci(),
                           first_choice=chosen_san, think=think, opp_intent=opp_intent, obs=obs,
                           reasoning=reasoning, recalled=recalled_view,

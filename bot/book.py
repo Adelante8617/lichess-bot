@@ -59,8 +59,27 @@ def lookup(board: chess.Board) -> dict | None:
         if best_key is None or key > best_key:
             best_key = key
             best = {"uci": uci, "san": e["san"], "count": e["count"], "avg_cp": round(key[0]),
-                    "options": len(moves)}
+                    "n": 1 + e.get("confirm", 0), "options": len(moves)}
     return best
+
+
+def play_prob(n: int) -> float:
+    """命中谱时直接照走的概率：BOOK_PLAY_PROB + (1 - BOOK_PLAY_PROB) * (1 - 1/n)。
+    n = 这一步被选中的次数（入谱算 1 次，之后每次重新推理又选了它加 1）：
+    n=1 即基础概率（默认 0.6），n 越大越趋近 1，省得对已经反复确认的着法重复推理。"""
+    base = config.BOOK_PLAY_PROB
+    return base + (1 - base) * (1 - 1 / max(1, n))
+
+
+def confirm(board: chess.Board, uci: str) -> int:
+    """局面在谱里、模型重新推理后选了谱里已有的 uci：确认次数 +1 并存盘，返回新的 n；
+    该着法不在谱里（会在赛后评估通过后作为新选择入谱）返回 0。"""
+    e = _positions().get(board.epd(), {}).get(uci)
+    if e is None:
+        return 0
+    e["confirm"] = e.get("confirm", 0) + 1
+    _save()
+    return 1 + e["confirm"]
 
 
 def keepers(evals: list[tuple[int, int]], floor_cp: int) -> list[tuple[int, int]]:
