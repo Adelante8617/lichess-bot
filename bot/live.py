@@ -10,6 +10,8 @@ import time
 
 import chess
 
+from .archive import append_decision
+
 LIVE_PATH = os.getenv("LIVE_STATE_PATH", os.path.join("live", "state.json"))
 
 
@@ -96,6 +98,7 @@ class LiveState:
         self.s["decisions"][str(ply)] = dict(
             fields, ply=ply, tools=list(self.s["current_tools"]),
             elapsed=round(time.time() - since, 1) if since else None)
+        append_decision(self.s["game_id"], self.s["decisions"][str(ply)])
         self.s.update(status="waiting_opponent", thinking_since=None, stage="")
 
     @_safe

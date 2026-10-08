@@ -9,10 +9,13 @@ from .boardtext import (COLOR_ZH, board_meta, describe_last_move, display_san, l
                         material_lead, parse_model_move, piece_lists, render_board, san_history,
                         strip_check)
 from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, COMPLEXITY_CHECK, COMPLEXITY_DEFAULT,
-                     COMPLEXITY_PROFILE, HANG_GUARD, HANG_GUARD_MIN, HANG_GUARD_ROUNDS, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT, MATERIAL_LEAD_SKIP,
-                     OPENING_EFFORT, OPENING_FAST_MOVES, PLAN_MEMORY, SELF_CHECK_EFFORT,
-                     SELF_CHECK_ROUNDS, STRATEGY_STAGE, STRATEGY_STAGE_MAX_TOKENS, TOOL_ROUNDS)
-from .guard import material_risk, risk_text
+                     COMPLEXITY_PROFILE, HANG_GUARD, HANG_GUARD_MIN, HANG_GUARD_POSITIONAL,
+                     HANG_GUARD_ROUNDS, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT,
+                     MATERIAL_LEAD_SKIP, OPENING_EFFORT, OPENING_FAST_MOVES, PLAN_MEMORY,
+                     SELF_CHECK_EFFORT, SELF_CHECK_ROUNDS, STRATEGY_STAGE, STRATEGY_STAGE_MAX_TOKENS,
+                     TOOL_ROUNDS)
+from .archive import log_reasoning
+from .guard import material_risk, risk_text, verify_line
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
 from .memory import recall_experience
@@ -73,6 +76,7 @@ def self_check(board: chess.Board, messages: list, move: chess.Move,
             break
         content = (msg.content or "").strip()
         print(f"[SELF-CHECK round={rnd}] {content}")
+        log_reasoning(f"SELF-CHECK round={rnd}", reasoning_of(msg))
         obj = extract_json(content) or {}
         rec = {"round": rnd, "checked": san,
                **{k: str(obj.get(k, "")) for k in
@@ -106,22 +110,28 @@ def self_check(board: chess.Board, messages: list, move: chess.Move,
 def hang_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans: list[str],
                candidates: list[str], levels: list[str] | None = None,
                max_tokens: int | None = None) -> tuple[chess.Move, list[dict]]:
-    """丢子守卫：程序模拟对方吃子交换，会净亏 ≥ HANG_GUARD_MIN 分时把事实交给模型复查。
-    模型能给出拿回子力的具体变化就照走；否则改选，新着法同样要过守卫。
-    轮数用完仍会丢子时，从模型自己的 candidates 里挑第一个不丢子的着法（都丢子则保持原着法）。"""
+    """丢子守卫：程序模拟对方吃子交换，单格交换会净亏 ≥ HANG_GUARD_MIN 分时把模拟结果交给模型复查。
+    - 模型坚持并给出变化（tactical）：程序按规则摆一遍，合法且终点拿回子力 / 将杀就照走；
+      摆不通就把摆出的事实交回模型，进入下一轮。
+    - 模型坚持并说明局面性补偿（positional）：净亏 ≤ HANG_GUARD_POSITIONAL 时照走，不要求变化。
+    - 模型改选：新着法同样要过守卫。
+    轮数用完仍未解决时，从模型自己的 candidates 里挑第一个不丢子的着法（都丢子则保持原着法）。
+    每条记录带 outcome（kept_tactical / kept_positional / changed / fallback / unresolved），供赛后统计。"""
     records: list[dict] = []
     current = move
-    rejected: dict[chess.Move, str] = {}  # 已被查出丢子的着法 → 模拟结果
+    rejected: dict[chess.Move, str] = {}  # 模型自己放弃的、会丢子的着法 → 模拟结果
+    feedback = ""
     for rnd in range(1, HANG_GUARD_ROUNDS + 1):
         risk = material_risk(board, current)
         if risk["loss"] < HANG_GUARD_MIN:
             return current, records
         san = display_san(board, current)
         fact = risk_text(board, current, risk)
+        positional_ok = risk["loss"] <= HANG_GUARD_POSITIONAL
         print(f"[GUARD round={rnd}] {fact}")
         live.stage(f"丢子守卫：复查 {san}")
         rejected_view = {display_san(board, m): r for m, r in rejected.items()}
-        prompt = hang_guard_prompt(san, fact, legal_sans, rejected_view)
+        prompt = hang_guard_prompt(san, fact, legal_sans, rejected_view, positional_ok, feedback)
         try:
             msg, _ = llm_call(messages + [{"role": "user", "content": prompt}], levels=levels,
                               max_tokens=max_tokens)
@@ -130,36 +140,52 @@ def hang_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans:
             break
         content = (msg.content or "").strip()
         print(f"[GUARD reply round={rnd}] {content}")
+        log_reasoning(f"GUARD round={rnd}", reasoning_of(msg))
         obj = extract_json(content) or {}
-        rec = {"round": rnd, "checked": san, "fact": fact, "loss": risk["loss"],
-               **{k: str(obj.get(k, "")) for k in ("verdict", "move", "line", "reason")}}
+        rec = {"round": rnd, "checked": san, "checked_uci": current.uci(), "fact": fact,
+               "loss": risk["loss"],
+               **{k: str(obj.get(k, "")).strip() for k in ("verdict", "kind", "move", "line", "reason")},
+               "reasoning": reasoning_of(msg)}
         records.append(rec)
-        rejected[current] = fact
-        if rec["verdict"].strip().lower() == "keep":
-            if rec["line"].strip():
-                rec["note"] = f"模型坚持 {san}，给出的变化：{rec['line']}"
+        feedback = ""
+        if rec["verdict"].lower() == "keep":
+            if rec["line"]:
+                check = verify_line(board, current, rec["line"], HANG_GUARD_MIN, risk["square"])
+                rec["line_check"] = check["text"]
+                print(f"[GUARD] 核对变化：{check['text']}")
+                if check["ok"]:
+                    rec["outcome"], rec["note"] = "kept_tactical", f"保持 {san}，变化核对通过"
+                    return current, records
+                feedback = f"{rec['line']} → {check['text']}"
+            if positional_ok and rec["kind"].lower() == "positional" and rec["reason"]:
+                rec["outcome"], rec["note"] = "kept_positional", f"保持 {san}，局面性弃子：{rec['reason']}"
                 print(f"[GUARD] {rec['note']}")
                 return current, records
-            rec["note"] = "坚持原着法但没有给出拿回子力的变化，不予采纳"
-            break
+            if not feedback:
+                feedback = "上一轮选择保持，但没有给出变化。"
+            continue  # 同一着法再给一轮，带上摆出的事实
         new = parse_model_move(board, rec["move"])
-        if new is None or new in rejected:
-            rec["note"] = f"改选的着法无效或已被查出丢子：{rec['move']!r}"
+        if new is None or new == current or new in rejected:
+            rec["note"] = f"改选的着法无效或已放弃过：{rec['move']!r}"
             break
-        rec["changed_to"] = display_san(board, new)
+        rejected[current] = fact
+        rec["outcome"], rec["changed_to"] = "changed", display_san(board, new)
         print(f"[GUARD] 改选 {san} -> {rec['changed_to']}")
         current = new
     if material_risk(board, current)["loss"] < HANG_GUARD_MIN:
         return current, records
+    rejected[current] = ""
     for text in candidates:
         mv = parse_model_move(board, text)
-        if mv is not None and mv not in rejected and mv != current                 and material_risk(board, mv)["loss"] < HANG_GUARD_MIN:
-            note = f"复查后仍会丢子，改用候选里不丢子的 {display_san(board, mv)}"
+        if mv is not None and mv not in rejected and material_risk(board, mv)["loss"] < HANG_GUARD_MIN:
+            outcome, note = "fallback", f"复查后仍未解决，改用候选里不丢子的 {display_san(board, mv)}"
             break
     else:
-        mv, note = current, "复查后仍会丢子，但候选里没有不丢子的着法，保持原着法"
+        mv = current
+        outcome, note = "unresolved", "复查后仍未解决，但候选里没有不丢子的着法，保持原着法"
     print(f"[GUARD] {note}")
-    records.append({"round": len(records) + 1, "checked": display_san(board, current), "note": note,
+    records.append({"round": len(records) + 1, "checked": display_san(board, current),
+                    "checked_uci": current.uci(), "outcome": outcome, "note": note,
                     **({"changed_to": display_san(board, mv)} if mv != current else {})})
     return mv, records
 
@@ -349,7 +375,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
             break
 
         if reasoning:
-            print(f"[REASONING attempt={attempt}] {len(reasoning)} 字")
+            log_reasoning(f"attempt={attempt}", reasoning)
         print(f"[LLM raw attempt={attempt}] {content}")
 
         cur_think, cur_move, cur_opp = "", "", ""

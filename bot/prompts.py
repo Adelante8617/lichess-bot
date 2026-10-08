@@ -233,25 +233,35 @@ STRATEGY_STAGE_PROMPT = """先不要选着，也不要计算变化。只完成�
  "candidates": [{"move": "SAN", "purpose": "应对威胁/战术机会/推进方针", "idea": "≤30 字"}]}"""
 
 
-def hang_guard_prompt(san: str, fact: str, legal_sans: list[str], rejected: dict[str, str]) -> str:
-    """丢子守卫：程序模拟出会净亏子力时，把事实交给模型复查。rejected：已被守卫查出丢子的着法。"""
+def hang_guard_prompt(san: str, fact: str, legal_sans: list[str], rejected: dict[str, str],
+                      positional_ok: bool, feedback: str = "") -> str:
+    """丢子守卫：程序模拟出单格交换会净亏时，把模拟结果作为参考交给模型复查。
+    语气保持中性：模拟只算同一格上的轮流吃子，有意弃子和漏看都是正常结论，不暗示哪个对。
+    rejected：已被查出丢子并被模型自己放弃的着法；positional_ok：亏损额度内允许只凭理由坚持；
+    feedback：上一轮坚持时给出的变化，程序按规则摆出的结果。"""
     rejected_section = ""
     if rejected:
         lines = "\n".join(f"- {m}：{r}" for m, r in rejected.items())
-        rejected_section = f"\n下面的着法同样已被查出会丢子，不要改回它们：\n{lines}\n"
-    return f"""落子前复查：程序按规则模拟了对方的吃子交换（这是规则层面的事实，不会算错）：
+        rejected_section = f"\n你前面已经放弃的着法（同一格交换会亏子）：\n{lines}\n"
+    feedback_section = f"\n你上一轮给出的变化，程序按规则摆了一遍：{feedback}\n" if feedback else ""
+    positional = ("\n- 局面性弃子：这次的亏损不大，如果你是有意用子力换取长期补偿（王的安全、通路兵、"
+                  "子力活跃度等），可以不写变化，在 reason 里说明补偿是什么。" if positional_ok else "")
+    return f"""落子前的一次补充核对。程序做了一个简单的吃子交换模拟，供你参考：
 {fact}
-{rejected_section}
-只有两种情况可以坚持 {san}：
-- 你能写出一条具体变化，证明丢掉的子能拿回来、或能将杀、或能吃到更多子力；
-- 对方吃子之后，我方有更强的手段（如将军抽子、捉双）是上面的简单交换没有算到的。
-"争取主动""打开线路"这类理由不算。否则改选一个不丢子的着法，优先从你刚才的候选里挑，
-必须来自合法走法列表：
-{", ".join(legal_sans)}
+这个模拟只看同一格上双方轮流吃子，不考虑将军、捉双、牵制、闪击、升变，也不考虑局面上的补偿，
+所以它只是一条参考信息，不代表这步一定不好。
+{rejected_section}{feedback_section}
+请结合你自己的分析独立判断，下面两种结论都是正常的：
+- 如果你之前漏看了这个吃子，就改选一个着法（改选时同样要考虑落点安全），可以从你的候选里挑；
+- 如果你本来就是有意弃子，看到了模拟没算到的手段，就保持 {san}，在 line 里写出对方吃子之后的具体变化
+  （程序会按规则摆一遍，核对变化是否合法、最后子力或将杀情况如何）。{positional}
+
+合法走法：{", ".join(legal_sans)}
 
 严格输出 JSON（不要 markdown）：
 {{"verdict": "keep 或 change", "move": "keep 时填 {san}；change 时填新着法",
- "line": "keep 时必填：拿回子力的具体变化（SAN 序列）；change 时留空", "reason": "≤60 字"}}"""
+ "kind": "keep 时填 tactical（战术，有具体变化）或 positional（局面性补偿）；change 时留空",
+ "line": "tactical 时填对方吃子之后的具体变化（SAN 序列），否则留空", "reason": "≤80 字"}}"""
 
 
 def strategy_stage_section(urgent: str, strategy: str, candidates: list[dict]) -> str:

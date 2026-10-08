@@ -47,7 +47,7 @@ class FakeClient:
         self.prompts.append(last)
         if "只判断当前局面的复杂度" in last:
             return _msg(json.dumps({"complexity": self.complexity, "reason": "测试"}, ensure_ascii=False))
-        if "程序按规则模拟了对方的吃子交换" in last:
+        if "程序做了一个简单的吃子交换模拟" in last:
             return _msg(json.dumps(self.guard_replies.pop(0), ensure_ascii=False))
         if "落子前" in last and "复查" in last:
             return _msg(json.dumps(self.self_check_replies.pop(0), ensure_ascii=False))
@@ -141,10 +141,38 @@ class HangGuardTest(unittest.TestCase):
         self.assertEqual(san, "Re2")
         self.assertIn("hxg5", client.prompts[0])  # 模拟出的交换序列交给模型
 
-    def test_keep_with_line_is_accepted(self):
-        san, records, _ = self.run_guard([{"verdict": "keep", "move": "Bg5", "line": "hxg5 Nxg5 ...",
-                                           "reason": "能拿回"}])
-        self.assertEqual(san, "Bg5")
+    def test_bogus_line_is_not_accepted(self):
+        # 变化里 hxg5 Nxg5 后我方仍亏子：核对不通过，两轮后用候选里安全的 Re2
+        bogus = {"verdict": "keep", "move": "Bg5", "kind": "tactical", "line": "hxg5 Nxg5",
+                 "reason": "能拿回"}
+        san, records, client = self.run_guard([bogus, bogus])
+        self.assertEqual(san, "Re2")
+        self.assertIn("摆了一遍", client.prompts[1])  # 第二轮把摆出的事实交回模型
+
+    def test_sacrifice_with_valid_line_is_kept(self):
+        # 希腊式弃象：Bxh7+ Kxh7 Ng5+ ... 一路将杀，变化经规则核对通过，照走
+        board = chess.Board("rnbq1rk1/pppn1ppp/4p3/3pP3/1b1P4/2NB1N2/PPP2PPP/R1BQK2R w KQ - 0 7")
+        line = "Bxh7+ Kxh7 Ng5+ Kg8 Qh5 Re8 Qxf7+ Kh8 Qh5+ Kg8 Qh7+ Kf8 Qh8+ Ke7 Qxg7"
+        llm._client = FakeClient({}, [], guard_replies=[
+            {"verdict": "keep", "move": "Bxh7+", "kind": "tactical", "line": line, "reason": "杀王"}])
+        mv, records = player.hang_guard(board, [], board.parse_san("Bxh7+"),
+                                        list(player.legal_san_map(board)), [])
+        self.assertEqual(board.san(mv), "Bxh7+")
+        self.assertEqual(records[0]["outcome"], "kept_tactical")
+
+    def test_positional_keep_without_line(self):
+        board = chess.Board("rnbq1rk1/pppn1ppp/4p3/3pP3/1b1P4/2NB1N2/PPP2PPP/R1BQK2R w KQ - 0 7")
+        llm._client = FakeClient({}, [], guard_replies=[
+            {"verdict": "keep", "move": "Bxh7+", "kind": "positional", "line": "", "reason": "王翼被削弱"}])
+        mv, records = player.hang_guard(board, [], board.parse_san("Bxh7+"),
+                                        list(player.legal_san_map(board)), [])
+        self.assertEqual(board.san(mv), "Bxh7+")
+        self.assertEqual(records[0]["outcome"], "kept_positional")
+
+    def test_guard_prompt_is_neutral(self):
+        _, _, client = self.run_guard([change("Re2")])
+        self.assertNotIn("不会算错", client.prompts[0])
+        self.assertIn("只是一条参考信息", client.prompts[0])
 
     def test_keep_without_line_falls_back_to_safe_candidate(self):
         san, records, _ = self.run_guard([keep("Bg5")])
@@ -161,6 +189,19 @@ class HangGuardTest(unittest.TestCase):
         mv, records = player.hang_guard(self.board, [], self.board.parse_san("Re2"), self.legal, [])
         self.assertEqual(records, [])
         self.assertEqual(llm._client.prompts, [])
+
+
+class ArchiveTest(unittest.TestCase):
+    def test_decision_reasoning_is_saved_per_game(self):
+        from bot.live import live
+        live.start_game("archive_test", "local", "白")
+        live.decision(1, move_san="e4", reasoning="测试思考内容")
+        live.decision(3, move_san="Nf3", reasoning="第二步的思考")
+        path = os.path.join("logs", "games", "archive_test.jsonl")
+        with open(path, encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f]
+        self.assertEqual([r["ply"] for r in rows], [1, 3])
+        self.assertEqual(rows[0]["reasoning"], "测试思考内容")
 
 
 class GetMoveTest(unittest.TestCase):

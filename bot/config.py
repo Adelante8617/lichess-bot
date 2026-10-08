@@ -87,6 +87,16 @@ SELF_CHECK_ROUNDS = int(os.getenv("SELF_CHECK_ROUNDS", "2"))   # 0 关闭落子�
 HANG_GUARD = os.getenv("HANG_GUARD", "1") == "1"
 HANG_GUARD_MIN = int(os.getenv("HANG_GUARD_MIN", "2"))      # 默认 2：放过弃一兵的开局弃兵
 HANG_GUARD_ROUNDS = int(os.getenv("HANG_GUARD_ROUNDS", "2"))
+# 净亏 ≤ 该值时，模型可以不写变化、只凭局面性补偿的理由坚持（默认 2：弃半子 / 一子换兵）；0 = 一律要变化
+HANG_GUARD_POSITIONAL = int(os.getenv("HANG_GUARD_POSITIONAL", "2"))
+# 守卫的赛后统计（Stockfish 评估每次触发时的原着法与最终着法），逐局追加
+GUARD_STATS_PATH = os.getenv("GUARD_STATS_PATH", os.path.join("data", "guard_stats.jsonl"))
+GUARD_OK_DELTA = int(os.getenv("GUARD_OK_DELTA", "50"))   # 着法损失 < 该值（cp）算"其实没问题"
+
+# 模型的思考过程：LOG_REASONING=1 时完整打印到日志；每步的完整记录（思考 / 自检 / 守卫）
+# 另外逐局存到 GAME_ARCHIVE_DIR/<时间>_<对局>.jsonl（live/state.json 每局会被清空）
+LOG_REASONING = os.getenv("LOG_REASONING", "1") == "1"
+GAME_ARCHIVE_DIR = os.getenv("GAME_ARCHIVE_DIR", os.path.join("logs", "games"))
 # 自检的思考档位上限：决策档位高于它时，自检降到该档（空 = 不封顶，沿用决策档位）
 SELF_CHECK_EFFORT = os.getenv("SELF_CHECK_EFFORT", "low").strip().lower()
 
