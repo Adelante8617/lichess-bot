@@ -13,15 +13,15 @@ from .boardtext import (COLOR_ZH, board_meta, describe_last_move, display_san, l
 from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, BOOK_ENABLED, COMPLEXITY_CHECK,
                      COMPLEXITY_DEFAULT, COMPLEXITY_PROFILE, HANG_GUARD, HANG_GUARD_MIN,
                      HANG_GUARD_POSITIONAL, HANG_GUARD_ROUNDS, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT,
-                     MATERIAL_LEAD_SKIP, OPENING_EFFORT, OPENING_FAST_MOVES, PLAN_MEMORY,
+                     MATERIAL_LEAD_SKIP, MATE_GUARD, MATE_GUARD_ROUNDS, OPENING_EFFORT, OPENING_FAST_MOVES, PLAN_MEMORY,
                      PV_FOLLOW_EFFORT, PV_MEMORY, SELF_CHECK_EFFORT, SELF_CHECK_ROUNDS, STRATEGY_STAGE, STRATEGY_STAGE_MAX_TOKENS,
                      TOOL_ROUNDS)
-from .guard import material_risk, risk_text, verify_line
+from .guard import allows_mate, mate_in_one, mate_threat, material_risk, risk_text, verify_line
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
 from .memory import recall_experience
 from .prompts import (STRATEGY_STAGE_PROMPT, book_warning_section, complexity_prompt,
-                      hang_guard_prompt, prev_line_section, self_check_prompt, strategy_stage_section,
+                      hang_guard_prompt, mate_guard_prompt, prev_line_section, self_check_prompt, strategy_stage_section,
                       system_prompt, user_prompt)
 from .tools import play_tools, run_tool
 
@@ -248,6 +248,60 @@ def hang_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans:
     return mv, records
 
 
+def mate_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans: list[str],
+               candidates: list[str], levels: list[str] | None = None,
+               max_tokens: int | None = None) -> tuple[chess.Move, list[dict]]:
+    """将杀守卫：程序按规则查到走完 move 后对方有一步杀时，只告诉模型"存在一步杀"（不给对方着法），
+    要求改选；被将杀没有补偿可言，不允许坚持。改选的着法同样要查，最多 MATE_GUARD_ROUNDS 轮。
+    仍未解决时依次从模型的候选、全部合法着法里找不会被一步杀的（优先不丢子的），都没有则保持原着法。"""
+    records: list[dict] = []
+    current = move
+    rejected: list[chess.Move] = []  # 查到会被一步杀的着法
+    for rnd in range(1, MATE_GUARD_ROUNDS + 1):
+        if not allows_mate(board, current):
+            return current, records
+        san = display_san(board, current)
+        rejected.append(current)
+        print(f"[MATE-GUARD round={rnd}] 走完 {san} 后对方有一步杀")
+        live.stage(f"将杀守卫：{san} 会被一步杀")
+        prompt = mate_guard_prompt(san, legal_sans, [display_san(board, m) for m in rejected[:-1]])
+        try:
+            msg, _ = llm_call(messages + [{"role": "user", "content": prompt}], levels=levels,
+                              max_tokens=max_tokens)
+        except Exception as e:
+            print(f"[MATE-GUARD] LLM failed: {e}")
+            break
+        content = (msg.content or "").strip()
+        print(f"[MATE-GUARD reply round={rnd}] {content}")
+        log_reasoning(f"MATE-GUARD round={rnd}", reasoning_of(msg))
+        obj = extract_json(content) or {}
+        rec = {"round": rnd, "checked": san, **{k: str(obj.get(k, "")).strip() for k in ("move", "reason")},
+               "reasoning": reasoning_of(msg)}
+        records.append(rec)
+        new = parse_model_move(board, rec["move"])
+        if new is None or new in rejected:
+            rec["note"] = f"改选的着法无效或同样会被一步杀：{rec['move']!r}"
+            print(f"[MATE-GUARD] {rec['note']}")
+            break
+        rec["outcome"], rec["changed_to"] = "changed", display_san(board, new)
+        print(f"[MATE-GUARD] 改选 {san} -> {rec['changed_to']}")
+        current = new
+    if not allows_mate(board, current):
+        return current, records
+    pool = [m for m in (parse_model_move(board, c) for c in candidates) if m is not None] \
+        + list(board.legal_moves)
+    safe = [m for m in dict.fromkeys(pool) if m != current and not allows_mate(board, m)]
+    if safe:
+        mv = next((m for m in safe if material_risk(board, m)["loss"] < HANG_GUARD_MIN), safe[0])
+        outcome, note = "fallback", f"复查后仍会被一步杀，改用不会被一步杀的 {display_san(board, mv)}"
+    else:
+        mv, outcome, note = current, "unresolved", "所有合法着法都会被一步杀，保持原着法"
+    print(f"[MATE-GUARD] {note}")
+    records.append({"round": len(records) + 1, "checked": display_san(board, current), "outcome": outcome,
+                    "note": note, **({"changed_to": display_san(board, mv)} if mv != current else {})})
+    return mv, records
+
+
 def strategy_stage(board: chess.Board, messages: list) -> dict | None:
     """第一阶段：关闭思考，只定紧急情况 / 战略方针 / ≤3 个候选。
     不给思考空间，模型就没法把合法着法逐个试一遍。失败或没有合法候选时返回 None（退回单阶段）。"""
@@ -288,7 +342,8 @@ def is_opening_fast(board: chess.Board, prev_board: chess.Board | None,
     return True
 
 
-def classify_complexity(board: chess.Board, last_section: str, legal_sans: list[str]) -> tuple[str, str]:
+def classify_complexity(board: chess.Board, last_section: str, legal_sans: list[str],
+                        threat: bool = False) -> tuple[str, str]:
     """独立的一次不思考调用，只判断当前局面复杂度，返回 (simple/medium/complex, 理由)。
     程序只提供盘面与双方着法列表等原始事实，判断由模型做；失败时返回 COMPLEXITY_DEFAULT。"""
     opp_sans = "（我方正被将军，略）"
@@ -299,7 +354,7 @@ def classify_complexity(board: chess.Board, last_section: str, legal_sans: list[
     recent = " ".join(san_history(board).split()[-12:]) or "（尚无着法）"
     prompt = complexity_prompt(side=COLOR_ZH[board.turn], board_text=render_board(board),
                                last_move=last_section, recent=recent, meta=board_meta(board),
-                               legal_sans=legal_sans, opp_sans=opp_sans)
+                               legal_sans=legal_sans, opp_sans=opp_sans, mate_threat=threat)
     live.stage("判断局面复杂度")
     try:
         msg, _ = llm_call([{"role": "user", "content": prompt}], levels=["off"], max_tokens=512)
@@ -326,18 +381,37 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         return None, "no legal move", "", {}
     legal_sans = list(san_map)
 
+    # 一步杀（任一方）只用来分流：不背谱、不走快速模式、不直接续走主变；不告诉模型我方的杀着，
+    # 对方的一步杀威胁只在 prompt 里提醒存在
+    my_mate = MATE_GUARD and mate_in_one(board)
+    opp_threat = MATE_GUARD and mate_threat(board)
+    critical = my_mate or opp_threat
+    if critical:
+        print(f"[MATE] {'我方有一步杀 ' if my_mate else ''}{'对方有一步杀威胁' if opp_threat else ''}".strip())
+
+    def safe_shortcut(mv: chess.Move) -> bool:
+        """不经模型直接走 mv 是否稳妥：走完不会被一步杀；我方有一步杀时，mv 自己得是杀着。"""
+        if not MATE_GUARD:
+            return True
+        if my_mate:
+            after = board.copy(stack=False)
+            after.push(mv)
+            return after.is_checkmate()
+        return not allows_mate(board, mv)
+
     # 上一步算出的主变：对方按主变应着时，连杀或对方唯一应着就不再推理，直接走下一步
     plan = recall_plan(board)
     prog = line_progress(board, plan) if PV_MEMORY else None
-    if prog and prog["next"] is not None:
+    followed = bool(prog and prog["next"] is not None)
+    following = followed and safe_shortcut(prog["next"])
+    if following:
         if plan["mate"]:
             return play_line_move(board, ply, plan, prog, "主变是连杀，对方按计算应着")
         if prog["only_reply"]:
             return play_line_move(board, ply, plan, prog, f"{prog['actual']} 是对方唯一的合法应着")
-    following = bool(prog and prog["next"] is not None)
 
     # 背谱：当前局面在谱里时，按概率直接照走；否则（或抽到重新推理）走正常流程
-    hit = book.lookup(board) if BOOK_ENABLED else None
+    hit = book.lookup(board) if BOOK_ENABLED and not critical else None
     if hit:
         # 重新推理后又选了这一步的次数越多（n），越可信，越不必再花时间重复推理
         prob = book.play_prob(hit["n"], hit["avg_cp"])
@@ -365,7 +439,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         last_section = "（开局第一手，对方尚未走子）"
 
     live.thinking(ply)
-    fast = is_opening_fast(board, prev_board, opp_last_move)
+    fast = not critical and is_opening_fast(board, prev_board, opp_last_move)
     # 经验召回要做一次 embedding，与复杂度判断的 LLM 调用互不依赖，并行跑
     recall_pool = ThreadPoolExecutor(max_workers=1)
     recall_future = None if fast else recall_pool.submit(recall_experience, board)
@@ -384,7 +458,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         ladder = think_ladder(PV_FOLLOW_EFFORT)
         max_tokens = COMPLEXITY_PROFILE.get(complexity, [None, LLM_MAX_TOKENS])[1]
         print(f"[PV] {complexity_reason} -> effort={PV_FOLLOW_EFFORT}, max_tokens={max_tokens}")
-    elif MATERIAL_LEAD_SKIP > 0 and (lead := material_lead(board)) >= MATERIAL_LEAD_SKIP:
+    elif not critical and MATERIAL_LEAD_SKIP > 0 and (lead := material_lead(board)) >= MATERIAL_LEAD_SKIP:
         # 子力大幅领先：不调 LLM 判断复杂度，直接用较低档位；复杂度标签取起始档位相同的那一档
         complexity = next((k for k, (e, _) in COMPLEXITY_PROFILE.items() if e == MATERIAL_LEAD_EFFORT),
                           COMPLEXITY_DEFAULT)
@@ -393,7 +467,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         max_tokens = COMPLEXITY_PROFILE.get(complexity, [None, LLM_MAX_TOKENS])[1]
         print(f"[COMPLEXITY] {complexity_reason} -> effort={MATERIAL_LEAD_EFFORT}, max_tokens={max_tokens}")
     elif COMPLEXITY_CHECK:
-        complexity, complexity_reason = classify_complexity(board, last_section, legal_sans)
+        complexity, complexity_reason = classify_complexity(board, last_section, legal_sans, opp_threat)
         start, max_tokens = COMPLEXITY_PROFILE[complexity]
         ladder = think_ladder(start)
         print(f"[COMPLEXITY] {complexity}（{complexity_reason}）-> effort={start}, max_tokens={max_tokens}")
@@ -416,8 +490,9 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         recalled=recall_section, legal_sans=legal_sans, fast=fast,
         complexity=complexity, complexity_reason=complexity_reason,
         prev_line=prev_line_section(prog["line_san"], plan["goal"], prog["expected"], prog["actual"],
-                                    display_san(board, prog["next"]) if following else "")
-        if prog else "")
+                                    display_san(board, prog["next"]) if followed else "")
+        if prog else "",
+        mate_threat=opp_threat)
 
     messages = [
         {"role": "system", "content": system_prompt()},
@@ -530,6 +605,11 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
                     guards += more
             if guards:
                 obs["guard"] = guards
+            if MATE_GUARD:  # 最后一道：被一步杀压过一切，放在丢子守卫与自检之后
+                mv, mate_checks = mate_guard(board, messages, mv, legal_sans, guard_cands,
+                                             levels=check_levels, max_tokens=max_tokens)
+                if mate_checks:
+                    obs["mate_guard"] = mate_checks
             if display_san(board, mv) != chosen_san:
                 warnings.append(f"落子前复查后改选：{chosen_san} → {display_san(board, mv)}")
                 obs["pv"] = []  # 原主变基于旧着法，已失效

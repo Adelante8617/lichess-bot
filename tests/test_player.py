@@ -588,5 +588,120 @@ class LineMemoryTest(unittest.TestCase):
         self.assertEqual(player._plans[chess.WHITE]["line"], ["e2e4", "e7e5"])
 
 
+LOST_GAME = ("d4 d5 Bf4 Nc6 c3 e6 Nf3 Nf6 Qc2 Be7 Bg3 O-O e3 Bd6 Nbd2 Bxg3 a3 Bd6 h4 e5 g4 Nxg4 Ng5"
+             .split())  # 实战：黑方接着走 h6??，白 Qh7#
+
+
+def lost_position() -> chess.Board:
+    board = chess.Board()
+    for san in LOST_GAME:
+        board.push_san(san)
+    return board
+
+
+class MateGuardTest(unittest.TestCase):
+    def setUp(self):
+        player._plans.clear()
+
+    def client(self, decision: dict, guard_moves: list[str]) -> FakeClient:
+        """决策回答 decision；将杀守卫的每轮依次改选 guard_moves。"""
+        client = FakeClient(decision, [keep(decision["move"])] * 3)
+        original = client._create
+        replies = list(guard_moves)
+
+        def create(**kw):
+            last = kw["messages"][-1]["content"]
+            if "一步就能将杀" in last:
+                client.prompts.append(last)
+                return _msg(json.dumps({"move": replies.pop(0), "reason": "防杀"}, ensure_ascii=False))
+            return original(**kw)
+
+        client.chat.completions.create = create
+        llm._client = client
+        return client
+
+    def test_rule_checks(self):
+        board = lost_position()
+        self.assertTrue(player.mate_threat(board))
+        self.assertFalse(player.mate_in_one(board))
+        self.assertTrue(player.allows_mate(board, board.parse_san("h6")))
+        self.assertFalse(player.allows_mate(board, board.parse_san("g6")))
+
+    def test_lost_game_h6_is_replaced(self):
+        board = lost_position()
+        client = self.client({"think": "x", "candidates": [{"move": "h6"}], "pv": ["h6"], "move": "h6"},
+                             ["g6"])
+        uci, _, _, obs = player.get_llm_move(board, 24, None, None)
+        self.assertEqual(board.san(chess.Move.from_uci(uci)), "g6")
+        self.assertEqual(obs["mate_guard"][0]["changed_to"], "g6")
+        guard_prompt = next(p for p in client.prompts if "一步就能将杀" in p)
+        decision_prompt = next(p for p in client.prompts if "【当前局面，轮到你走】" in p)
+        # 只告诉存在一步杀，不泄露对方的杀着
+        for prompt in (guard_prompt, decision_prompt):
+            self.assertNotIn("Qxh7", prompt)
+            self.assertNotIn("Qh7", prompt)
+        self.assertIn("对方有一步将杀", decision_prompt)
+
+    def test_insisting_falls_back_to_safe_candidate(self):
+        board = lost_position()
+        self.client({"think": "x", "candidates": [{"move": "h6"}, {"move": "Nf6"}], "pv": ["h6"],
+                     "move": "h6"}, ["h6", "h6"])
+        uci, _, _, obs = player.get_llm_move(board, 24, None, None)
+        self.assertEqual(board.san(chess.Move.from_uci(uci)), "Nf6")
+        self.assertEqual(obs["mate_guard"][-1]["outcome"], "fallback")
+
+    def test_safe_move_makes_no_extra_call(self):
+        board = lost_position()
+        client = self.client({"think": "x", "pv": ["g6"], "move": "g6"}, [])
+        uci, *_ = player.get_llm_move(board, 24, None, None)
+        self.assertEqual(uci, "g7g6")
+        self.assertFalse(any("一步就能将杀" in p for p in client.prompts))
+
+    def test_own_mate_in_one_skips_book_and_fast_mode(self):
+        board = chess.Board()
+        for san in ["e4", "e5", "Bc4", "Nc6", "Qh5", "Nf6"]:
+            board.push_san(san)
+        self.client({"think": "x", "pv": ["Qxf7+"], "move": "Qxf7+"}, [])
+        original_lookup = player.book.lookup
+        player.book.lookup = lambda b: {"uci": "a2a3", "san": "a3", "n": 9, "count": 9, "avg_cp": 50,
+                                        "options": 1}
+        player.OPENING_FAST_MOVES = 8
+        try:
+            uci, _, _, obs = player.get_llm_move(board, 7, None, None)
+        finally:
+            player.book.lookup = original_lookup
+            player.OPENING_FAST_MOVES = 0
+        self.assertEqual(uci, "h5f7")
+        self.assertNotEqual(obs.get("complexity_reason"), "开局快速模式")
+        prompt = next(p for p in llm._client.prompts if "【当前局面，轮到你走】" in p)
+        self.assertNotIn("Qxf7#", prompt)  # 我方的一步杀不告诉模型
+
+    def test_pv_shortcut_not_taken_into_mate(self):
+        # 主变下一步会被一步杀：不直接走，交给模型（再由守卫拦下）
+        board = lost_position()
+        board.pop()  # 回到白方 Ng5 之前，让黑方的"主变"从 ...Nxg4 之前开始
+        board.pop()
+        self.client({"think": "x", "pv": ["Nxg4", "Ng5", "h6"], "move": "Nxg4"}, [])
+        uci, *_ = player.get_llm_move(board, 22, None, None)
+        self.assertEqual(uci, "f6g4")
+        board.push_uci(uci)
+        board.push_san("Ng5")
+        # Ng5 不是白方唯一应着，本来就不会直接走；把它伪装成唯一应着，确认安全检查仍会拦住
+        original = player.line_progress
+
+        def forced(b, plan):
+            prog = original(b, plan)
+            return dict(prog, only_reply=True) if prog else prog
+
+        player.line_progress = forced
+        try:
+            client = self.client({"think": "x", "pv": ["g6"], "move": "g6"}, [])
+            uci, *_ = player.get_llm_move(board, 24, None, None)
+        finally:
+            player.line_progress = original
+        self.assertEqual(uci, "g7g6")
+        self.assertTrue(client.prompts)
+
+
 if __name__ == "__main__":
     unittest.main()

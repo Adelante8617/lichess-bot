@@ -78,7 +78,7 @@ TRUNCATE_REASONING_TAIL = int(os.getenv("TRUNCATE_REASONING_TAIL", "4000"))
 COMPLEXITY_CHECK = os.getenv("COMPLEXITY_CHECK", "1") == "1"   # 0 = 关闭，回到 THINK_LADDER 全阶梯
 # 复杂度 → [起始档位, max_tokens]；重试时从起始档位沿 THINK_LADDER 往下降
 COMPLEXITY_PROFILE = json.loads(os.getenv("COMPLEXITY_PROFILE") or
-                                '{"simple": ["off", 4096], "medium": ["low", 8192], "complex": ["high", 16384]}')
+                                '{"simple": ["off", 4096], "medium": ["low", 8192], "complex": ["high", 32768]}')
 COMPLEXITY_DEFAULT = os.getenv("COMPLEXITY_DEFAULT", "medium")  # 判断失败时使用
 # 我方子力（兵1 马象3 车5 后9）领先 ≥ 该值时跳过复杂度判断，直接用 MATERIAL_LEAD_EFFORT（0 = 关闭）。
 # 默认 12 ≈ 多一个后加一个轻子：领先这么多时稳妥简化就够，少于这个领先仍可能被翻盘，要正常思考
@@ -97,6 +97,11 @@ HANG_GUARD_MIN = int(os.getenv("HANG_GUARD_MIN", "2"))      # 默认 2：放过�
 HANG_GUARD_ROUNDS = int(os.getenv("HANG_GUARD_ROUNDS", "2"))
 # 净亏 ≤ 该值时，模型可以不写变化、只凭局面性补偿的理由坚持（默认 2：弃半子 / 一子换兵）；0 = 一律要变化
 HANG_GUARD_POSITIONAL = int(os.getenv("HANG_GUARD_POSITIONAL", "2"))
+# 将杀守卫：按规则检查走完某步后对方有没有一步杀，有就只告诉模型"存在一步杀"（不给具体着法）让它改选，
+# 最多 MATE_GUARD_ROUNDS 轮，仍未解决时改用候选里（再不行从合法着法里）不会被一步杀的着法。
+# 同时：任一方存在一步杀时不背谱、不进开局快速模式；对方有一步杀威胁时在 prompt 里提醒一句（同样不给着法）
+MATE_GUARD = os.getenv("MATE_GUARD", "1") == "1"
+MATE_GUARD_ROUNDS = int(os.getenv("MATE_GUARD_ROUNDS", "2"))
 # 守卫的赛后统计（Stockfish 评估每次触发时的原着法与最终着法），逐局追加
 GUARD_STATS_PATH = os.getenv("GUARD_STATS_PATH", os.path.join("data", "guard_stats.jsonl"))
 GUARD_OK_DELTA = int(os.getenv("GUARD_OK_DELTA", "50"))   # 着法损失 < 该值（cp）算"其实没问题"

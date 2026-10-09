@@ -1,7 +1,8 @@
 """落子前的丢子守卫：按规则模拟走完某步后，对方在每个格上的吃子交换能净得多少分。
 
 这是对局中唯一由程序"算"出的东西，只覆盖最朴素的一类失误：走完之后对方直接吃子就能净赚
-（如象走到被兵控制的格、高价值子吃被保护的低价值子）。捉双、牵制、将杀等战术不在此列，仍由模型判断。
+（如象走到被兵控制的格、高价值子吃被保护的低价值子）。捉双、牵制等战术不在此列，仍由模型判断。
+将杀只查一步杀（mate_in_one / allows_mate / mate_threat），只用来告诉模型"存在一步杀"，不提供具体着法。
 算法是标准的静态交换（SEE）：双方轮流用价值最低的子在同一格上吃，任何一方都可以停手；
 用合法着法生成，自动处理牵制、X 光和将军。
 
@@ -75,6 +76,34 @@ def risk_text(board: chess.Board, move: chess.Move, risk: dict) -> str:
     return (f"走 {san} 之后，对方可以在 {risk['square']} 上吃子：按双方都用价值最低的子在该格轮流吃、"
             f"吃亏的一方停手来模拟，交换序列为 {line}，单看这一格的交换，我方净亏 {risk['loss']} 分"
             f"（兵1 马象3 车5 后9，已算上 {san} 本身吃到的子）。")
+
+
+def mate_in_one(board: chess.Board) -> bool:
+    """轮到走的一方有没有一步就将杀的着法。"""
+    for mv in board.legal_moves:
+        if board.gives_check(mv):
+            board.push(mv)
+            mate = board.is_checkmate()
+            board.pop()
+            if mate:
+                return True
+    return False
+
+
+def allows_mate(board: chess.Board, move: chess.Move) -> bool:
+    """走 move 之后，对方有没有一步杀。"""
+    after = board.copy(stack=False)
+    after.push(move)
+    return mate_in_one(after)
+
+
+def mate_threat(board: chess.Board) -> bool:
+    """假如现在轮到对方走（我方空一步），对方有没有一步杀。被将军时空着不合法，返回 False。"""
+    if board.is_check():
+        return False
+    after = board.copy(stack=False)
+    after.push(chess.Move.null())
+    return mate_in_one(after)
 
 
 def _tokens(line: str) -> list[str]:

@@ -55,6 +55,8 @@ SYSTEM_PROMPT = """你是一个国际象棋 AI。每一步按下面的流程思�
   · 同理，我方高价值子被对方低价值子攻击时，即使有保护也要处理（被吃后吃回仍然亏）；对方高价值子被我方低价值子攻击，就是我的机会。
 - 兵只能斜着向前吃子：白兵向第 8 横排方向走，吃左前 / 右前一格（e4 兵控制 d5、f5）；
   黑兵向第 1 横排方向走，吃左下 / 右下一格（h6 黑兵控制 g5，b7 黑兵控制 a6、c6）。把子走到对方兵控制的格上，就是送给兵吃。
+- 王不能吃回被保护的子：只靠王保护的格子，被对方两个子同时攻击时，对方可以吃进来；
+  如果这一吃是将军，往往就是将杀。不要把"有王保护"当成安全。
 - 不做未经验证的弃子：只有在算清楚能拿回子力、能将杀、或获得决定性优势时才弃子；
   "争取主动""打开线路""制造威胁"这类模糊理由不算。
 - 已经落后时，更要避免连续冒险；先稳住局面，不要孤注一掷。子力领先时，兑子简化通常是好方针。
@@ -112,13 +114,19 @@ def system_prompt() -> str:
     return SYSTEM_PROMPT + "\n\n棋盘辅助：\n" + "\n".join(extra)
 
 
+MATE_THREAT_NOTE = ("\n==== 程序提醒 ====\n"
+                    "假如现在轮到对方走，对方有一步将杀（程序只查到存在，不提供是哪一步）。"
+                    "这一步要防住它。\n")
+
+
 def user_prompt(*, board_text: str, last_move: str, history: str, my_color: str, my_pieces: str,
                 opp_pieces: str, meta: str, ply: int, relations: str, prev_strategy: str | None,
                 recalled: str, legal_sans: list[str], fast: bool, complexity: str,
-                complexity_reason: str, prev_line: str = "") -> str:
+                complexity_reason: str, prev_line: str = "", mate_threat: bool = False) -> str:
     """每一步的局面描述。relations 为空表示不附子力关系；prev_strategy 为 None 表示不带上一步方针；
-    prev_line 为 prev_line_section() 的结果，空表示没有可用的上一步主变。"""
-    aid = ""
+    prev_line 为 prev_line_section() 的结果，空表示没有可用的上一步主变；
+    mate_threat：程序查到对方有一步杀威胁，只提醒存在，不给着法。"""
+    aid = MATE_THREAT_NOTE if mate_threat else ""
     if relations:
         aid += f"\n==== 子力关系（程序按规则列出的原始事实，不含任何判断）====\n{relations}\n"
     if prev_strategy is not None:
@@ -128,7 +136,7 @@ def user_prompt(*, board_text: str, last_move: str, history: str, my_color: str,
     if fast:
         effort = ("- 【开局快速模式】这是常规开局阶段：按开局原则（或调用 search_opening_book）快速选着，"
                   "不要长时间计算；complexity 填 simple，strategy 一句话，think ≤60 字，pv 给 3 步即可；"
-                  "只需确认所走的子不会被白吃。")
+                  "只需确认所走的子不会被白吃、走完不会被对方一步将杀。")
     elif complexity:
         effort = (f"- 本步局面复杂度已单独判定为 {complexity}（{complexity_reason}），按此档决定思考投入，"
                   f"complexity 字段照填 {complexity}；")
@@ -183,12 +191,13 @@ def prev_line_section(line: list[str], goal: str, expected: str, actual: str, ne
 
 
 def complexity_prompt(*, side: str, board_text: str, last_move: str, recent: str, meta: str,
-                      legal_sans: list[str], opp_sans: str) -> str:
+                      legal_sans: list[str], opp_sans: str, mate_threat: bool = False) -> str:
     """独立的一次不思考调用，只判断复杂度。"""
+    threat = "程序提醒：假如轮到对方走，对方有一步将杀。\n" if mate_threat else ""
     return f"""只判断当前局面的复杂度，不要选着、不要计算变化。
 盘面(白=W*, 黑=B*, '.'=空，第二个字母为子种 K/Q/R/B/N/P)，轮到{side}走：
 {board_text}
-
+{threat}
 对方刚走的一步：{last_move}
 最近着法：{recent}
 {meta}
@@ -281,6 +290,21 @@ def hang_guard_prompt(san: str, fact: str, legal_sans: list[str], rejected: dict
 {{"verdict": "keep 或 change", "move": "keep 时填 {san}；change 时填新着法",
  "kind": "keep 时填 tactical（战术，有具体变化）或 positional（局面性补偿）；change 时留空",
  "line": "tactical 时填对方吃子之后的具体变化（SAN 序列），否则留空", "reason": "≤80 字"}}"""
+
+
+def mate_guard_prompt(san: str, legal_sans: list[str], rejected: list[str]) -> str:
+    """将杀守卫：程序查到走完 san 后对方有一步杀。只告诉存在，不给对方的着法；不允许坚持原着。"""
+    rejected_section = (f"\n下面这些着法同样查到会被一步将杀，也不能走：{', '.join(rejected)}\n"
+                        if rejected else "")
+    return f"""落子前的一次补充核对：程序按规则检查发现，走完 {san} 之后，对方有一步就能将杀我方的着法
+（程序不提供是哪一步）。{san} 不能走，请改选。
+{rejected_section}
+找出对方的将杀手段，选一个能防住它的着法即可，不必重新全面分析局面；优先从你刚才的候选里挑。
+
+合法走法：{", ".join(legal_sans)}
+
+严格输出 JSON（不要 markdown）：
+{{"move": "新着法（SAN）", "reason": "≤60 字：对方的将杀手段是什么，新着法怎样防住"}}"""
 
 
 def book_warning_section(items: list[dict]) -> str:
