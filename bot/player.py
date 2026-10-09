@@ -606,8 +606,9 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
             if guards:
                 obs["guard"] = guards
             if MATE_GUARD:  # 最后一道：被一步杀压过一切，放在丢子守卫与自检之后
+                # 要在防法里算出最强的，沿用本步决策的档位（不像自检那样封顶），只在真有一步杀时才调用
                 mv, mate_checks = mate_guard(board, messages, mv, legal_sans, guard_cands,
-                                             levels=check_levels, max_tokens=max_tokens)
+                                             levels=ladder[step:], max_tokens=max_tokens)
                 if mate_checks:
                     obs["mate_guard"] = mate_checks
             if display_san(board, mv) != chosen_san:
