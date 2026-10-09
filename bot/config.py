@@ -46,6 +46,10 @@ WAIT_TIMEOUT_SEC = int(os.getenv("WAIT_TIMEOUT_SEC", "60"))
 BOARD_RELATIONS = os.getenv("BOARD_RELATIONS", "0") == "1"   # prompt 附上子力关系图
 ANALYSIS_BOARD = os.getenv("ANALYSIS_BOARD", "0") == "1"     # 提供 play_line 分析棋盘工具
 PLAN_MEMORY = os.getenv("PLAN_MEMORY", "1") == "1"           # 把上一步定下的战略方针带给下一步
+# 把上一步算出的主变 pv 及其目的带给下一步：对方按主变应着时续走（连杀 / 对方唯一应着时不调 LLM 直接走），
+# 对方偏离主变时告诉模型"预期 vs 实际"
+PV_MEMORY = os.getenv("PV_MEMORY", "1") == "1"
+PV_FOLLOW_EFFORT = os.getenv("PV_FOLLOW_EFFORT", "low").strip().lower()  # 按主变续走、需要模型确认时的档位
 # 1 = 先用一次不思考的调用定下紧急情况 / 战略方针 / ≤3 个候选，再让决策调用只计算这几个候选。
 # 思考模型的隐藏推理不受提示词约束，会逐个试合法着法；关掉第一步的思考才能强制"先定方针"
 STRATEGY_STAGE = os.getenv("STRATEGY_STAGE", "0") == "1"

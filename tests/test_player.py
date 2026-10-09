@@ -511,5 +511,82 @@ class TruncateSalvageTest(unittest.TestCase):
         self.assertNotIn("对照上面的棋盘核实", retry)  # 带末尾时仍是原来的直接要结论
 
 
+class LineMemoryTest(unittest.TestCase):
+    """上一步主变 pv 跨步保存：连杀 / 唯一应着直接走，按主变应着时提示续走，偏离时提示预期 vs 实际。"""
+
+    def setUp(self):
+        player._plans.clear()
+
+    def first_move(self, board: chess.Board, decision: dict) -> chess.Board:
+        """我方按 decision 走一步，返回走之前的局面（供下一步的 prev_board）。"""
+        llm._client = FakeClient(decision, [keep(decision["move"])])
+        uci, *_ = player.get_llm_move(board, board.ply() + 1, None, None)
+        board.push_uci(uci)
+        return board.copy()
+
+    def test_only_reply_plays_next_without_llm(self):
+        # Qd8+ 之后黑方只有 Kf7 一个合法应着：直接走主变里的 Qd5+（捉双抽车），不再调 LLM
+        board = chess.Board("6k1/6pp/8/8/8/8/r5PP/3Q2K1 w - - 0 1")
+        prev = self.first_move(board, {"think": "x", "pv": ["Qd8+", "Kf7", "Qd5+", "Ke7", "Qxa2"],
+                                       "pv_goal": "将军后 Qd5+ 捉双，抽车", "move": "Qd8+"})
+        board.push_san("Kf7")
+        llm._client = FakeClient({"move": "Kf1"}, [])
+        uci, think, _, obs = player.get_llm_move(board, board.ply() + 1, prev, "g8f7")
+        self.assertEqual(board.san(chess.Move.from_uci(uci)), "Qd5+")
+        self.assertEqual(llm._client.prompts, [])
+        self.assertIn("唯一", think)
+        self.assertEqual(obs["pv"], ["Qd5+", "Ke7", "Qxa2"])
+        self.assertEqual(obs["pv_goal"], "将军后 Qd5+ 捉双，抽车")
+
+    def test_mate_line_executed_by_rule(self):
+        # 主变摆到底是将杀：对方按主变应着（虽然不是唯一应着）就直接走
+        board = chess.Board()
+        for san in ["e4", "e5", "Bc4", "Nc6"]:
+            board.push_san(san)
+        prev = self.first_move(board, {"think": "x", "pv": ["Qh5", "Nf6", "Qxf7+"],
+                                       "pv_goal": "f7 只有王保护，Qxf7 杀", "move": "Qh5"})
+        self.assertTrue(player._plans[chess.WHITE]["mate"])
+        board.push_san("Nf6")
+        llm._client = FakeClient({"move": "a3"}, [])
+        uci, *_ = player.get_llm_move(board, board.ply() + 1, prev, "g8f6")
+        self.assertEqual(uci, "h5f7")
+        self.assertEqual(llm._client.prompts, [])
+
+    def test_mate_line_deviation_rethinks(self):
+        board = chess.Board()
+        for san in ["e4", "e5", "Bc4", "Nc6"]:
+            board.push_san(san)
+        prev = self.first_move(board, {"think": "x", "pv": ["Qh5", "Nf6", "Qxf7+"],
+                                       "pv_goal": "f7 只有王保护，Qxf7 杀", "move": "Qh5"})
+        board.push_san("g6")
+        llm._client = FakeClient({"think": "x", "pv": ["Qf3"], "move": "Qf3"}, [keep("Qf3")])
+        uci, *_ = player.get_llm_move(board, board.ply() + 1, prev, "g7g6")
+        self.assertEqual(uci, "h5f3")
+        decision_prompt = next(p for p in llm._client.prompts if "【当前局面，轮到你走】" in p)
+        self.assertIn("你预期对方走 Nf6，对方实际走了 g6", decision_prompt)
+        self.assertIn("f7 只有王保护", decision_prompt)
+        self.assertTrue(any("只判断当前局面的复杂度" in p for p in llm._client.prompts))
+
+    def test_followed_line_asks_model_to_confirm(self):
+        # 对方按主变应着、但既不是连杀也不是唯一应着：提示模型续走，跳过复杂度判断
+        board = chess.Board()
+        prev = self.first_move(board, {"think": "x", "pv": ["e4", "e5", "Nf3"],
+                                       "pv_goal": "出子攻击 e5", "move": "e4"})
+        board.push_san("e5")
+        llm._client = FakeClient({"think": "x", "pv": ["Nf3", "Nc6"], "move": "Nf3"}, [keep("Nf3")])
+        uci, _, _, obs = player.get_llm_move(board, 3, prev, "e7e5")
+        self.assertEqual(uci, "g1f3")
+        self.assertFalse(any("只判断当前局面的复杂度" in p for p in llm._client.prompts))
+        decision_prompt = next(p for p in llm._client.prompts if "【当前局面，轮到你走】" in p)
+        self.assertIn("计划中的下一步是 Nf3", decision_prompt)
+        self.assertIn("出子攻击 e5", decision_prompt)
+        self.assertIn("对方按上一步主变应着", obs["complexity_reason"])
+
+    def test_invalid_pv_is_truncated(self):
+        board = chess.Board()
+        self.first_move(board, {"think": "x", "pv": ["e4", "e5", "Ke3", "Nf3"], "move": "e4"})
+        self.assertEqual(player._plans[chess.WHITE]["line"], ["e2e4", "e7e5"])
+
+
 if __name__ == "__main__":
     unittest.main()

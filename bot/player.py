@@ -14,15 +14,15 @@ from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, BOOK_ENABLED, COMPLEXITY_C
                      COMPLEXITY_DEFAULT, COMPLEXITY_PROFILE, HANG_GUARD, HANG_GUARD_MIN,
                      HANG_GUARD_POSITIONAL, HANG_GUARD_ROUNDS, LLM_MAX_TOKENS, MATERIAL_LEAD_EFFORT,
                      MATERIAL_LEAD_SKIP, OPENING_EFFORT, OPENING_FAST_MOVES, PLAN_MEMORY,
-                     SELF_CHECK_EFFORT, SELF_CHECK_ROUNDS, STRATEGY_STAGE, STRATEGY_STAGE_MAX_TOKENS,
+                     PV_FOLLOW_EFFORT, PV_MEMORY, SELF_CHECK_EFFORT, SELF_CHECK_ROUNDS, STRATEGY_STAGE, STRATEGY_STAGE_MAX_TOKENS,
                      TOOL_ROUNDS)
 from .guard import material_risk, risk_text, verify_line
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
 from .memory import recall_experience
 from .prompts import (STRATEGY_STAGE_PROMPT, book_warning_section, complexity_prompt,
-                      hang_guard_prompt, self_check_prompt, strategy_stage_section, system_prompt,
-                      user_prompt)
+                      hang_guard_prompt, prev_line_section, self_check_prompt, strategy_stage_section,
+                      system_prompt, user_prompt)
 from .tools import play_tools, run_tool
 
 
@@ -32,22 +32,78 @@ def fallback_move(legal_moves: list[str]) -> str:
     return random.choice(legal_moves)
 
 
-# 模型自己定下的战略方针：{我方颜色: (定下方针时的着法序列 UCI, 方针)}。
-# 新局面若不是在该序列基础上继续（换了一盘棋），方针自动作废。
-_plans: dict[bool, tuple[list[str], str]] = {}
+# 模型自己定下的计划：{我方颜色: {
+#   "moves": 定下计划时的着法序列 UCI（含这一步我方着法）, "strategy": 战略方针,
+#   "line": 主变 UCI（从这一步我方着法开始，程序按规则摆过，保证合法）, "goal": 主变的目的,
+#   "mate": 主变摆到底是我方将杀}}。
+# 新局面若不是在 moves 基础上继续（换了一盘棋），计划自动作废。
+_plans: dict[bool, dict] = {}
 
 
-def recall_plan(board: chess.Board) -> str:
+def recall_plan(board: chess.Board) -> dict | None:
     stored = _plans.get(board.turn)
     if not stored:
-        return ""
-    moves, plan = stored
+        return None
     now = [m.uci() for m in board.move_stack]
-    return plan if now[:len(moves)] == moves else ""
+    return stored if now[:len(stored["moves"])] == stored["moves"] else None
+
+
+def line_from_pv(board: chess.Board, move: chess.Move, pv) -> tuple[list[str], bool]:
+    """按规则摆一遍模型给的主变（pv[0] 必须是实际走的着法），在第一个摆不通的着法处截断。
+    返回 (UCI 序列, 摆到底是否我方将杀)。"""
+    if not isinstance(pv, list) or not pv or parse_model_move(board, str(pv[0])) != move:
+        return [], False
+    tmp = board.copy()
+    line = []
+    for text in pv:
+        mv = parse_model_move(tmp, str(text))
+        if mv is None:
+            break
+        line.append(mv.uci())
+        tmp.push(mv)
+    return line, len(line) % 2 == 1 and tmp.is_checkmate()
+
+
+def line_progress(board: chess.Board, plan: dict | None) -> dict | None:
+    """对照上一步保存的主变看对方刚走的一步。按主变应着时 next 为主变里我方的下一步，偏离时为 None；
+    没有可用主变（没存、隔了不止一步、按主变应着但主变到此为止）返回 None。"""
+    if not plan or len(plan["line"]) < 2 or len(board.move_stack) != len(plan["moves"]) + 1:
+        return None
+    before_reply = board.copy()
+    reply = before_reply.pop()
+    origin = before_reply.copy()
+    origin.pop()
+    line_san = []
+    for u in plan["line"]:
+        mv = chess.Move.from_uci(u)
+        line_san.append(display_san(origin, mv))
+        origin.push(mv)
+    followed = reply.uci() == plan["line"][1]
+    nxt = chess.Move.from_uci(plan["line"][2]) if followed and len(plan["line"]) > 2 else None
+    if followed and (nxt is None or nxt not in board.legal_moves):
+        return None
+    return {"line_san": line_san, "expected": line_san[1], "actual": display_san(before_reply, reply),
+            "next": nxt, "only_reply": before_reply.legal_moves.count() == 1}
+
+
+def play_line_move(board: chess.Board, ply: int, plan: dict, prog: dict, why: str):
+    """不调 LLM，直接走主变里我方的下一步，剩下的主变留给再下一步。"""
+    mv = prog["next"]
+    san = display_san(board, mv)
+    _plans[board.turn] = dict(plan, moves=[m.uci() for m in board.move_stack] + [mv.uci()],
+                              line=plan["line"][2:])
+    note = f"按上一步主变直接走 {san}（{why}）。主变：{' '.join(prog['line_san'])}；目的：{plan['goal'] or '无'}"
+    print(f"[PV] {note}")
+    obs = {"strategy": plan["strategy"], "pv": prog["line_san"][2:], "pv_goal": plan["goal"],
+           "line_follow": note}
+    live.thinking(ply)
+    live.decision(ply, move_san=san, move_uci=mv.uci(), think=note, opp_intent="", obs=obs,
+                  reasoning="", recalled=[], warnings=[], attempts=0, fallback=False)
+    return mv.uci(), note, "", obs
 
 
 OBS_KEYS = ["complexity", "complexity_reason", "urgent", "strategy",
-            "candidates", "pv", "board_summary"]
+            "candidates", "pv", "pv_goal", "board_summary"]
 
 
 def self_check(board: chess.Board, messages: list, move: chess.Move,
@@ -270,6 +326,16 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         return None, "no legal move", "", {}
     legal_sans = list(san_map)
 
+    # 上一步算出的主变：对方按主变应着时，连杀或对方唯一应着就不再推理，直接走下一步
+    plan = recall_plan(board)
+    prog = line_progress(board, plan) if PV_MEMORY else None
+    if prog and prog["next"] is not None:
+        if plan["mate"]:
+            return play_line_move(board, ply, plan, prog, "主变是连杀，对方按计算应着")
+        if prog["only_reply"]:
+            return play_line_move(board, ply, plan, prog, f"{prog['actual']} 是对方唯一的合法应着")
+    following = bool(prog and prog["next"] is not None)
+
     # 背谱：当前局面在谱里时，按概率直接照走；否则（或抽到重新推理）走正常流程
     hit = book.lookup(board) if BOOK_ENABLED else None
     if hit:
@@ -310,6 +376,14 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         complexity, complexity_reason = "simple", "开局快速模式"
         ladder = think_ladder(OPENING_EFFORT)
         max_tokens = COMPLEXITY_PROFILE.get("simple", [None, LLM_MAX_TOKENS])[1]
+    elif following:
+        # 对方按主变应着：计划已经算过，只需确认，复杂度标签取起始档位相同的那一档
+        complexity = next((k for k, (e, _) in COMPLEXITY_PROFILE.items() if e == PV_FOLLOW_EFFORT),
+                          COMPLEXITY_DEFAULT)
+        complexity_reason = f"对方按上一步主变应着，确认后续走 {display_san(board, prog['next'])}"
+        ladder = think_ladder(PV_FOLLOW_EFFORT)
+        max_tokens = COMPLEXITY_PROFILE.get(complexity, [None, LLM_MAX_TOKENS])[1]
+        print(f"[PV] {complexity_reason} -> effort={PV_FOLLOW_EFFORT}, max_tokens={max_tokens}")
     elif MATERIAL_LEAD_SKIP > 0 and (lead := material_lead(board)) >= MATERIAL_LEAD_SKIP:
         # 子力大幅领先：不调 LLM 判断复杂度，直接用较低档位；复杂度标签取起始档位相同的那一档
         complexity = next((k for k, (e, _) in COMPLEXITY_PROFILE.items() if e == MATERIAL_LEAD_EFFORT),
@@ -338,9 +412,12 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         history=san_history(board) or "（尚无着法）", my_color=my_color_str,
         my_pieces=my_pieces, opp_pieces=opp_pieces, meta=board_meta(board), ply=ply,
         relations=board_view.relations_text(board) if BOARD_RELATIONS else "",
-        prev_strategy=recall_plan(board) if PLAN_MEMORY else None,
+        prev_strategy=(plan or {}).get("strategy", "") if PLAN_MEMORY else None,
         recalled=recall_section, legal_sans=legal_sans, fast=fast,
-        complexity=complexity, complexity_reason=complexity_reason)
+        complexity=complexity, complexity_reason=complexity_reason,
+        prev_line=prev_line_section(prog["line_san"], plan["goal"], prog["expected"], prog["actual"],
+                                    display_san(board, prog["next"]) if following else "")
+        if prog else "")
 
     messages = [
         {"role": "system", "content": system_prompt()},
@@ -352,7 +429,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         messages[1]["content"] += book_warning_section(book_warn)
         print("[BOOK] 提醒：" + "；".join(f"{w['san']}（选过 {w['n']} 次，评分 {w['avg_cp'] / 100:+.2f}）"
                                           for w in book_warn))
-    stage = strategy_stage(board, messages) if STRATEGY_STAGE and not fast else None
+    stage = strategy_stage(board, messages) if STRATEGY_STAGE and not fast and not following else None
     if stage:
         # 附在 user 提示末尾（而不是新增消息），非法着法重试时保留的 messages[:2] 里也有它
         messages[1]["content"] += strategy_stage_section(stage["urgent"], stage["strategy"],
@@ -456,8 +533,13 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
             if display_san(board, mv) != chosen_san:
                 warnings.append(f"落子前复查后改选：{chosen_san} → {display_san(board, mv)}")
                 obs["pv"] = []  # 原主变基于旧着法，已失效
-            if PLAN_MEMORY and obs.get("strategy"):
-                _plans[board.turn] = ([m.uci() for m in board.move_stack] + [mv.uci()], obs["strategy"])
+            line, mate = line_from_pv(board, mv, obs.get("pv")) if PV_MEMORY else ([], False)
+            # 模型这一步没写方针时沿用上一步的
+            strategy = obs.get("strategy") or (plan or {}).get("strategy", "")
+            if strategy or line:
+                _plans[board.turn] = {"moves": [m.uci() for m in board.move_stack] + [mv.uci()],
+                                      "strategy": strategy, "line": line, "mate": mate,
+                                      "goal": str(obs.get("pv_goal") or "").strip()}
             if book_warn:
                 obs["book_warning"] = [f"{w['san']}：选过 {w['n']} 次，评分 {w['avg_cp'] / 100:+.2f}"
                                        for w in book_warn]

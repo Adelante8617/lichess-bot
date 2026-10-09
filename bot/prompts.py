@@ -70,6 +70,8 @@ SYSTEM_PROMPT = """你是一个国际象棋 AI。每一步按下面的流程思�
 - candidates: [{"move": "SAN", "purpose": "应对威胁/战术机会/推进方针", "pros": "...", "cons": "..."}]
 - think: 推理总结。simple ≤80 字，medium ≤200 字，complex ≤400 字。含安全检查结论。
 - pv: 由计算得出的主变，≥3 个 SAN，格式 ["我方着","对方应着","我方着",...]，pv[0] 必须等于 move。
+- pv_goal: ≤80 字，这条主变为什么成立（对方为什么只能 / 最可能这样应）、要达成什么目的
+  （如"将军后车无保护，Qxa1 抽车"、"连续将军，Qh7 杀"）。下一步会连同 pv 一起交还给你，免得重新推导。
 - board_summary: ≤80 字，客观刻画局面骨架（材料差、王安全、关键弱点、双方计划），供以后检索复用。
 - move: 最终唯一着法，逐字取自合法走法列表（SAN）。
 
@@ -83,6 +85,7 @@ SYSTEM_PROMPT = """你是一个国际象棋 AI。每一步按下面的流程思�
   "candidates": [{"move": "e4", "purpose": "推进方针", "pros": "...", "cons": "..."}],
   "think": "",
   "pv": ["e4", "e5", "Nf3"],
+  "pv_goal": "",
   "board_summary": "",
   "move": "e4"
 }"""
@@ -112,14 +115,16 @@ def system_prompt() -> str:
 def user_prompt(*, board_text: str, last_move: str, history: str, my_color: str, my_pieces: str,
                 opp_pieces: str, meta: str, ply: int, relations: str, prev_strategy: str | None,
                 recalled: str, legal_sans: list[str], fast: bool, complexity: str,
-                complexity_reason: str) -> str:
-    """每一步的局面描述。relations 为空表示不附子力关系；prev_strategy 为 None 表示不带上一步方针。"""
+                complexity_reason: str, prev_line: str = "") -> str:
+    """每一步的局面描述。relations 为空表示不附子力关系；prev_strategy 为 None 表示不带上一步方针；
+    prev_line 为 prev_line_section() 的结果，空表示没有可用的上一步主变。"""
     aid = ""
     if relations:
         aid += f"\n==== 子力关系（程序按规则列出的原始事实，不含任何判断）====\n{relations}\n"
     if prev_strategy is not None:
         aid += ("\n==== 你上一步定下的战略方针 ====\n"
                 f"{prev_strategy or '（尚无，请根据局面制定）'}\n")
+    aid += prev_line
     if fast:
         effort = ("- 【开局快速模式】这是常规开局阶段：按开局原则（或调用 search_opening_book）快速选着，"
                   "不要长时间计算；complexity 填 simple，strategy 一句话，think ≤60 字，pv 给 3 步即可；"
@@ -161,6 +166,20 @@ def user_prompt(*, board_text: str, last_move: str, history: str, my_color: str,
 - move 必须逐字取自上面的合法走法列表，且等于 pv[0]；candidates / pv 全部用 SAN。
 
 请按系统提示输出完整 JSON。"""
+
+
+def prev_line_section(line: list[str], goal: str, expected: str, actual: str, next_move: str) -> str:
+    """上一步算出的主变（SAN，第一步是上一步我方走的着）及其目的。
+    next_move 非空：对方按主变应着，计划中的下一步是它；为空：对方偏离了主变。"""
+    head = ("\n==== 你上一步算出的主变 ====\n"
+            f"主变：{' '.join(line)}\n"
+            f"目的：{goal or '（上一步没有写明）'}\n")
+    if next_move:
+        return head + (f"对方按你的计算走了 {actual}，计划中的下一步是 {next_move}。\n"
+                       f"先对照当前盘面确认上面的目的仍然成立；成立就走 {next_move}，不必从头重新计算，"
+                       f"think 里说明确认了什么即可；发现计算有误才另选。\n")
+    return head + (f"你预期对方走 {expected}，对方实际走了 {actual}，偏离了你的计算。\n"
+                   f"先弄清 {actual} 的意图和它带来的新威胁，原主变的目的是否还能实现要重新判断。\n")
 
 
 def complexity_prompt(*, side: str, board_text: str, last_move: str, recent: str, meta: str,
