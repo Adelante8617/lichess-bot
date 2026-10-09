@@ -482,6 +482,8 @@ class TruncateSalvageTest(unittest.TestCase):
         retry = calls[2]["messages"][-1]["content"]
         self.assertIn("要点整理", retry)
         self.assertIn("倾向 d4", retry)
+        self.assertIn("可能有错", retry)
+        self.assertIn("对照上面的棋盘核实", retry)
         self.assertNotIn("x" * 100, retry)  # 不再贴原始末尾
         self.assertNotIn("Qxh7", retry)  # 原文没出现过的着法不给下棋模型
         self.assertIn("[被截断思考的要点整理]", msg.reasoning_content)
@@ -506,6 +508,7 @@ class TruncateSalvageTest(unittest.TestCase):
         retry = calls[-1]["messages"][-1]["content"]
         self.assertIn("思考的最后部分", retry)
         self.assertIn("末尾：倾向 d4", retry)
+        self.assertNotIn("对照上面的棋盘核实", retry)  # 带末尾时仍是原来的直接要结论
 
 
 if __name__ == "__main__":

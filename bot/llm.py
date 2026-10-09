@@ -91,16 +91,20 @@ def llm_call(messages: list, tools: list | None = None, levels: list[str] | None
         reasoning = reasoning_of(msg)
         truncated.append(f"[effort={level} 的思考，被截断]\n{reasoning}")
         note = "你刚才的思考过长被截断，没有给出最终答案。\n"
+        ask = "不要再展开新的计算，直接根据已有分析选定着法，按系统提示输出完整 JSON。"
         summary, dropped = summarize_reasoning(reasoning) if TRUNCATE_SALVAGE == "summary" else ("", [])
         if dropped:  # 只记进日志 / 观战页，不给下棋模型
             truncated.append("[要点中被删除的行（含原文未出现的着法）]\n" + "\n".join(dropped))
         if summary:
             truncated.append(f"[被截断思考的要点整理]\n{summary}")
-            note += f"以下是你此前思考的要点整理：\n{summary}\n\n"
+            note += f"以下是你此前思考的要点整理，由程序自动压缩，可能有错：\n{summary}\n\n"
+            ask = ("不要盲目采信要点：选定着法前，对照上面的棋盘核实你要走的这一步"
+                   "（落点是否被攻击、有无保护、是否送子），以及要点里支撑这步的结论；"
+                   "要点与棋盘不符时以棋盘为准。只核实这一步，不要重新展开全面分析，"
+                   "然后按系统提示输出完整 JSON。")
         elif TRUNCATE_SALVAGE != "none" and TRUNCATE_REASONING_TAIL > 0 and reasoning:
             note += f"以下是你思考的最后部分：\n{reasoning[-TRUNCATE_REASONING_TAIL:]}\n\n"
-        msgs = messages + [{"role": "user", "content": note +
-                            "不要再展开新的计算，直接根据已有分析选定着法，按系统提示输出完整 JSON。"}]
+        msgs = messages + [{"role": "user", "content": note + ask}]
         use_tools = None
         print(f"[SALVAGE] 思考被截断（{len(reasoning)} 字），降档 {level} -> {levels[i + 1]} 直接要结论")
         live.stage(f"思考过长被截断，降档到 {levels[i + 1]}")
