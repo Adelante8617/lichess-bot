@@ -25,10 +25,25 @@ import chess  # noqa: E402
 from bot import guard, llm, player  # noqa: E402
 
 
-def _msg(content: str, finish: str = "stop"):
-    message = types.SimpleNamespace(content=content, tool_calls=None, reasoning_content="",
-                                    model_extra={})
-    return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message, finish_reason=finish)])
+def _delta(content=None, reasoning=None, tool_calls=None):
+    return types.SimpleNamespace(role="assistant", content=content, refusal=None, tool_calls=tool_calls,
+                                 model_extra={"reasoning_content": reasoning} if reasoning else {})
+
+
+def _chunk(delta, finish=None, **meta):
+    return types.SimpleNamespace(id="chatcmpl-t", model="fake", created=1, usage=None, **meta,
+                                 choices=[types.SimpleNamespace(index=0, delta=delta, finish_reason=finish,
+                                                                logprobs=None)])
+
+
+def _msg(content: str, finish: str = "stop", reasoning: str = ""):
+    """假的流式响应：思考、正文各拆成两段，最后一个片段带 finish_reason。"""
+    chunks = []
+    for text, key in ((reasoning, "reasoning"), (content, "content")):
+        if text:
+            half = len(text) // 2
+            chunks += [_chunk(_delta(**{key: part})) for part in (text[:half], text[half:]) if part]
+    return iter(chunks + [_chunk(_delta(), finish)])
 
 
 class FakeClient:
@@ -463,9 +478,7 @@ class TruncateSalvageTest(unittest.TestCase):
                     raise summary_reply
                 return _msg(summary_reply)
             if len(calls) == 1:  # 第一档：思考用光 max_tokens，正文为空
-                resp = _msg("", finish="length")
-                resp.choices[0].message.reasoning_content = self.REASONING
-                return resp
+                return _msg("", finish="length", reasoning=self.REASONING)
             return _msg(json.dumps({"move": "d4"}))
 
         llm._client = types.SimpleNamespace(
@@ -509,6 +522,146 @@ class TruncateSalvageTest(unittest.TestCase):
         self.assertIn("思考的最后部分", retry)
         self.assertIn("末尾：倾向 d4", retry)
         self.assertNotIn("对照上面的棋盘核实", retry)  # 带末尾时仍是原来的直接要结论
+
+
+def _real_chunk(delta: dict, finish=None, usage=None):
+    """用 openai 库真实的 ChatCompletionChunk，确认拼装逻辑对真实对象也成立。"""
+    from openai.types.chat import ChatCompletionChunk
+    return ChatCompletionChunk.model_validate({
+        "id": "chatcmpl-real", "object": "chat.completion.chunk", "created": 7, "model": "m",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}] if delta is not None else [],
+        **({"usage": usage} if usage else {})})
+
+
+def _status_error(code: int):
+    import httpx
+    from openai import InternalServerError
+    return InternalServerError(f"Error code: {code}", body=None,
+                               response=httpx.Response(code, request=httpx.Request("POST", "http://x")))
+
+
+class StreamTest(unittest.TestCase):
+    """流式片段拼装，以及断流 / 网关超时的处理。"""
+
+    def setUp(self):
+        self.sleep, llm.time.sleep = llm.time.sleep, lambda s: None
+        self.salvage, llm.TRUNCATE_SALVAGE = llm.TRUNCATE_SALVAGE, "tail"
+
+    def tearDown(self):
+        llm.time.sleep = self.sleep
+        llm.TRUNCATE_SALVAGE = self.salvage
+
+    def use(self, create):
+        llm._client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
+
+    def test_accumulates_everything(self):
+        chunks = [
+            _real_chunk({"role": "assistant", "reasoning_content": "先看 "}),
+            _real_chunk({"reasoning_content": "e4。"}),
+            _real_chunk({"content": "查一下"}),
+            _real_chunk({"tool_calls": [{"index": 0, "id": "call_a", "type": "function",
+                                         "function": {"name": "play_line", "arguments": '{"mo'}}]}),
+            _real_chunk({"tool_calls": [{"index": 1, "id": "call_b", "type": "function",
+                                         "function": {"name": "search_experience", "arguments": '{"q'}}]}),
+            _real_chunk({"tool_calls": [{"index": 0, "function": {"arguments": 'ves": "e4 e5"}'}}]}),
+            _real_chunk({"tool_calls": [{"index": 1, "function": {"arguments": 'uery": "x"}'}}]}),
+            _real_chunk({}, finish="tool_calls"),
+            _real_chunk(None, usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}),
+        ]
+        self.use(lambda **kw: iter(chunks))
+        resp = llm.complete(model="m", messages=[])
+        choice = resp.choices[0]
+        self.assertEqual(choice.finish_reason, "tool_calls")
+        self.assertEqual(resp.id, "chatcmpl-real")
+        self.assertEqual(resp.usage.total_tokens, 15)
+        msg = choice.message
+        self.assertEqual(msg.content, "查一下")
+        self.assertEqual(llm.reasoning_of(msg), "先看 e4。")
+        self.assertEqual([tc.id for tc in msg.tool_calls], ["call_a", "call_b"])
+        self.assertEqual(json.loads(msg.tool_calls[0].function.arguments), {"moves": "e4 e5"})
+        self.assertEqual(json.loads(msg.tool_calls[1].function.arguments), {"query": "x"})
+        self.assertEqual(msg.tool_calls[1].model_dump()["function"]["name"], "search_experience")
+
+    def test_reasoning_field_name_variant(self):
+        self.use(lambda **kw: iter([_real_chunk({"reasoning": "想"}), _real_chunk({"reasoning": "完"}),
+                                    _real_chunk({"content": "{}"}, finish="stop")]))
+        msg = llm.complete(model="m", messages=[]).choices[0].message
+        self.assertEqual(llm.reasoning_of(msg), "想完")
+
+    def test_request_is_streamed(self):
+        calls = []
+        self.use(lambda **kw: calls.append(kw) or _msg("{}"))
+        llm.llm_call([{"role": "user", "content": "x"}], levels=["low"])
+        self.assertTrue(calls[0]["stream"])
+
+    def test_gateway_timeout_retries_then_steps_down(self):
+        calls = []
+
+        def create(**kw):
+            calls.append(kw)
+            if len(calls) <= 2:  # 第一档：首次请求 + 1 次重试都是 524
+                raise _status_error(524)
+            return _msg(json.dumps({"move": "e4"}))
+
+        self.use(create)
+        msg, level = llm.llm_call([{"role": "user", "content": "x"}], levels=["high", "low"])
+        self.assertEqual(level, "low")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[2]["reasoning_effort"], "low")
+
+    def test_client_error_is_not_retried(self):
+        calls = []
+
+        def create(**kw):
+            calls.append(kw)
+            import httpx
+            from openai import BadRequestError
+            raise BadRequestError("bad", body=None,
+                                  response=httpx.Response(400, request=httpx.Request("POST", "http://x")))
+
+        self.use(create)
+        with self.assertRaises(Exception):
+            llm.llm_call([{"role": "user", "content": "x"}], levels=["high", "low"])
+        self.assertEqual(len(calls), 1)
+
+    def test_interrupted_stream_salvages_partial_reasoning(self):
+        import httpx
+        calls = []
+
+        def broken():
+            yield _chunk(_delta(reasoning="分析到一半：倾向 Nf3，"))
+            yield _chunk(_delta(reasoning="d4 也可以"))
+            raise httpx.ReadTimeout("stalled")
+
+        def create(**kw):
+            calls.append(kw)
+            return broken() if len(calls) == 1 else _msg(json.dumps({"move": "Nf3"}))
+
+        self.use(create)
+        msg, level = llm.llm_call([{"role": "user", "content": "x"}], levels=["high", "low"])
+        self.assertEqual(level, "low")
+        retry = calls[1]["messages"][-1]["content"]
+        self.assertIn("连接中断", retry)
+        self.assertIn("倾向 Nf3，d4 也可以", retry)  # 断开前收到的思考完整带回
+        self.assertIn("中途断开", msg.reasoning_content)
+
+    def test_missing_finish_reason(self):
+        self.use(lambda **kw: iter([_chunk(_delta(content='{"move": "e4"}'))]))
+        self.assertEqual(llm.complete(model="m", messages=[]).choices[0].finish_reason, "stop")
+        self.use(lambda **kw: iter([_chunk(_delta(reasoning="想了一半"))]))
+        with self.assertRaises(llm.StreamInterrupted) as ctx:
+            llm.complete(model="m", messages=[])
+        self.assertEqual(llm.reasoning_of(ctx.exception.partial.choices[0].message), "想了一半")
+
+    def test_safe_llm_move_falls_back_when_all_levels_fail(self):
+        def create(**kw):
+            raise _status_error(524)
+
+        self.use(create)
+        board = chess.Board()
+        uci, *_ = player.safe_llm_move(board, 1, None, None)
+        self.assertIn(chess.Move.from_uci(uci), board.legal_moves)
 
 
 class LineMemoryTest(unittest.TestCase):

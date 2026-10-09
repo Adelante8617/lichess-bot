@@ -18,6 +18,13 @@ MODEL = os.getenv("LLM_MODEL", "mimo-v2.5-pro")
 LLM_EXTRA_BODY = json.loads(os.getenv("LLM_EXTRA_BODY", "{}"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "8192"))       # 含思考过程的 token
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+# 1 = 流式请求：边生成边返回，长思考不会被中转站网关（如 Cloudflare 524，约 2 分钟收不到响应就断）掐断；
+# 程序把所有片段拼回成完整响应（正文、思考、工具调用、结束原因等），调用方与非流式无区别
+LLM_STREAM = os.getenv("LLM_STREAM", "1") == "1"
+# 读超时（秒）：流式时是两个片段之间最长的等待，非流式时是等整个响应
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))
+# 还没收到任何数据就失败（连接错误 / 超时 / 429 / 5xx）时重试几次；SDK 自带的重试关掉，由程序控制
+LLM_RETRIES = int(os.getenv("LLM_RETRIES", "1"))
 
 # ---- RAG 用的 embedding（换 embedding 模型后需重建向量：python reembed.py）----
 # EMBED_BACKEND=api   → 走 OpenAI 兼容接口（含本地 Ollama / vLLM 等的 /v1 地址）

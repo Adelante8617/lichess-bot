@@ -7,7 +7,7 @@ import chess
 from .boardtext import parse_model_move, san_history, uci_to_san
 from .config import MODEL, SNAPSHOT_DEDUPE_SIM, SNAPSHOT_OK_DELTA
 from .engine import stockfish_collect_blunders, stockfish_eval_move
-from .llm import client, extract_json
+from .llm import complete, extract_json
 from .memory import experience_rag
 from .tools import REVIEW_TOOLS, run_tool
 
@@ -45,7 +45,7 @@ PGN:
     text = ""
     try:
         for _ in range(3):
-            resp = client().chat.completions.create(
+            resp = complete(
                 model=MODEL,
                 messages=messages,
                 tools=REVIEW_TOOLS,
@@ -144,7 +144,7 @@ def blunder_deep_review(pgn_text: str, result: str, my_color: str):
   "lesson": "≤100 字"
 }}"""
         try:
-            resp = client().chat.completions.create(
+            resp = complete(
                 model=MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
@@ -234,7 +234,7 @@ def chat_review(chat_messages: list, result: str, my_color: str, my_username: st
 }}
 lessons 数量 1~5 条；只保留有普适价值的内容，闲聊忽略。"""
     try:
-        resp = client().chat.completions.create(
+        resp = complete(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,

@@ -226,7 +226,7 @@ def opponent_move(board, kind, engine, limit, blunder_rate, uci_list):
     for u in uci_list[:-1]:
         prev.push_uci(u)
     last = uci_list[-1] if uci_list else None
-    uci, *_ = bot.get_llm_move(board, board.ply() + 1, prev if last else None, last)
+    uci, *_ = bot.safe_llm_move(board, board.ply() + 1, prev if last else None, last)
     return chess.Move.from_uci(uci)
 
 

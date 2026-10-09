@@ -138,6 +138,8 @@ python main.py
 | `LLM_MODEL` | `mimo-v2.5-pro` | 模型名 |
 | `LLM_EXTRA_BODY` | `{}` | 供应商私有参数（JSON，原样合并进请求体）。deepseek-v4-flash（micuapi）默认即开启思考，传 `thinking` 对象反而会关闭；可设 `{"reasoning_effort": "high"}` |
 | `LLM_MAX_TOKENS` / `LLM_TEMPERATURE` | `8192` / `0.3` | 下棋阶段单次回复上限（含思考）与采样温度 |
+| `LLM_STREAM` | `1` | 流式请求（下棋与复盘都用），长思考不会被中转站网关超时（Cloudflare 524）掐断；正文、思考、工具调用、结束原因、usage 等片段由程序拼回完整响应 |
+| `LLM_TIMEOUT` / `LLM_RETRIES` | `180` / `1` | 读超时秒数（流式时是两个片段之间的最长等待）/ 还没收到数据就失败（连接错误、超时、429、5xx）时的重试次数。仍失败或流中途断开时降一档重新请求（断开前的思考按截断补救带回），最后一档也失败则随机走合法着法保底 |
 | `AUTO_RECALL_K` | `3` | 每步自动召回的经验条数，`0` 关闭 |
 | `BOOK_ENABLED` / `BOOK_PLAY_PROB` / `BOOK_NEG_PLAY_PROB` / `BOOK_FLOOR_CP` / `BOOK_MAX_MOVES` / `BOOK_PATH` | `1` / `0.6` / `0.2` / `-100` / `15` / `data/opening_book.json` | 背谱开关 / 命中后直接照走的基础概率（n=1 时的值）/ 评估为负的着法的照走概率分子（概率 = 它 / (n+1)）/ 入谱评估下限（cp，我方视角）/ 每局最多记几步 / 谱文件 |
 | `SELF_CHECK_ROUNDS` | `2` | 落子前自检最多轮数，`0` 关闭 |

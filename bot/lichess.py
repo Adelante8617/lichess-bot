@@ -8,10 +8,10 @@ from datetime import datetime
 import berserk
 import chess
 
-from .boardtext import build_pgn, display_san, san_history
+from .boardtext import build_pgn, san_history
 from .config import LICHESS_TOKEN, WAIT_TIMEOUT_SEC
 from .live import live
-from .player import fallback_move, get_llm_move
+from .player import safe_llm_move
 from .book import commit_opening_book
 from .review import (blunder_deep_review, chat_review, commit_verified_snapshots,
                      post_game_review, record_snapshot)
@@ -243,20 +243,11 @@ def run_lichess():
                             pass
                     opp_last_move = uci_list[-1]
 
-                try:
-                    move, think, opp_intent, obs = get_llm_move(
-                        board, board.ply() + 1, prev_board, opp_last_move,
-                        chat_messages=chat_messages,
-                    )
-                except Exception as e:
-                    # LLM 接口异常也不能让这盘棋超时判负
-                    print(f"[ERROR] get_llm_move failed: {e}, random legal fallback")
-                    legal = [m.uci() for m in board.legal_moves]
-                    move, think, opp_intent, obs = fallback_move(legal), "", "", {}
-                    live.decision(board.ply() + 1, move_san=display_san(board, chess.Move.from_uci(move)),
-                                  move_uci=move, think="", opp_intent="", obs={},
-                                  warnings=[f"LLM 调用失败：{e}", "随机选择合法着法保底"],
-                                  attempts=0, fallback=True)
+                # LLM 接口异常也不能让这盘棋超时判负：safe_llm_move 出错时随机走合法着法
+                move, think, opp_intent, obs = safe_llm_move(
+                    board, board.ply() + 1, prev_board, opp_last_move,
+                    chat_messages=chat_messages,
+                )
                 if opp_intent:
                     print(f"[OPP]   {opp_intent}")
                 if obs:

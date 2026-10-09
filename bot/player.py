@@ -370,6 +370,20 @@ def classify_complexity(board: chess.Board, last_section: str, legal_sans: list[
     return level, reason
 
 
+def safe_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
+                  opp_last_move: str | None, **kw):
+    """get_llm_move 的保底包装：LLM 接口异常（降档后仍失败）也不能让对局中断或超时，随机走一步合法着法。"""
+    try:
+        return get_llm_move(board, ply, prev_board, opp_last_move, **kw)
+    except Exception as e:
+        print(f"[ERROR] get_llm_move failed: {e!r}, random legal fallback")
+        move = fallback_move([m.uci() for m in board.legal_moves])
+        live.decision(ply, move_san=display_san(board, chess.Move.from_uci(move)), move_uci=move,
+                      think="", opp_intent="", obs={},
+                      warnings=[f"LLM 调用失败：{e}", "随机选择合法着法保底"], attempts=0, fallback=True)
+        return move, "", "", {}
+
+
 def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
                  opp_last_move: str | None,
                  chat_messages: list | None = None):

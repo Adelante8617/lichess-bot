@@ -58,7 +58,7 @@ def opponent_move(board, kind, engine, limit, llm_ctx, blunder_rate=0.0):
             print("非法走法，请重输（SAN 如 Nf3，或 UCI 如 g1f3）")
     # kind == "llm"：对手也是同一套 LLM
     prev, last = llm_ctx
-    uci, *_ = bot.get_llm_move(board, board.ply() + 1, prev, last)
+    uci, *_ = bot.safe_llm_move(board, board.ply() + 1, prev, last)
     return chess.Move.from_uci(uci)
 
 
@@ -119,7 +119,8 @@ def main():
             if board.turn == my_white:
                 print(f"\n--- ply {board.ply() + 1} 我方走子 ---")
                 print(board)
-                move, think, opp_intent, obs = bot.get_llm_move(
+                # LLM 接口异常时随机走合法着法保底，不让整盘中断
+                move, think, opp_intent, obs = bot.safe_llm_move(
                     board, board.ply() + 1, prev if last else None, last)
                 print(f"[THINK] {think}\n[MOVE]  {move}")
                 move_log.append((board.ply() + 1, board.fen(), move, think))
