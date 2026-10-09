@@ -1,5 +1,6 @@
 """LLM 调用：OpenAI 兼容客户端、思考档位阶梯、截断后的降档补救、JSON 提取。"""
 import json
+import re
 
 from openai import OpenAI
 
@@ -90,7 +91,9 @@ def llm_call(messages: list, tools: list | None = None, levels: list[str] | None
         reasoning = reasoning_of(msg)
         truncated.append(f"[effort={level} 的思考，被截断]\n{reasoning}")
         note = "你刚才的思考过长被截断，没有给出最终答案。\n"
-        summary = summarize_reasoning(reasoning) if TRUNCATE_SALVAGE == "summary" else ""
+        summary, dropped = summarize_reasoning(reasoning) if TRUNCATE_SALVAGE == "summary" else ("", [])
+        if dropped:  # 只记进日志 / 观战页，不给下棋模型
+            truncated.append("[要点中被删除的行（含原文未出现的着法）]\n" + "\n".join(dropped))
         if summary:
             truncated.append(f"[被截断思考的要点整理]\n{summary}")
             note += f"以下是你此前思考的要点整理：\n{summary}\n\n"
@@ -112,16 +115,45 @@ SUMMARY_PROMPT = """下面是一段对国际象棋局面的思考过程，因为
 2. 发现的威胁与战术：对方的威胁、我方的战术机会、悬空或被攻击的子
 3. 目前倾向的着法及理由；若原文还没倾向，写最后正在分析的着法和进展
 
+必须忠实于原文：
+- 每个候选的结论必须是原文自己得出的结论，原文没算完就写"未算完"，不要替原文下结论或改动结论
+- 原文若已明确表态要走某步（如 "I'll play X"、"final: X"、"决定走 X"），第 3 项必须照写这步，
+  不能换成别的着法，也不能写成"无倾向"；表态后又犹豫的，写最后一次表态的着法，并注明在犹豫什么
+- 只能写原文出现过的着法，并沿用原文的写法（SAN，如 Nxe6、d8=Q），不要自己推出新的变化或着法
+  （原文没出现过的着法会被程序整行删除）
+
 总共不超过 400 字。
 
 【被截断的思考】
 {reasoning}"""
 
+# 要点里可核对的着法：带棋子字母 / 吃子 / 升变 / 易位。单纯的兵步（如 g5）与格子名分不开，不检查
+MOVE_RE = re.compile(r"(?<![A-Za-z0-9])(O-O(?:-O)?|[KQRBN][a-h]?[1-8]?x?[a-h][1-8]"
+                     r"|[a-h]x[a-h][1-8](?:=?[QRBN])?|[a-h][18]=?[QRBN])(?![a-z0-9])")
 
-def summarize_reasoning(reasoning: str) -> str:
-    """把被截断的思考压缩成要点（不思考的独立调用）；失败或为空时返回空串，由调用方退回带末尾。"""
+
+def _move_key(san: str) -> str:
+    """忽略吃子符号与消歧字母比较：Nfxd4 与 Nxd4 视为同一步。"""
+    if san.startswith("O-O") or san[0] not in "KQRBN":
+        return san.replace("x", "").replace("=", "")
+    return san[0] + re.findall(r"[a-h][1-8]", san)[-1]
+
+
+def drop_unseen_moves(summary: str, reasoning: str) -> tuple[str, list[str]]:
+    """删掉要点里含原文没出现过的着法的行，返回 (保留的要点, 被删的行)。"""
+    seen = {_move_key(m) for m in MOVE_RE.findall(reasoning)}
+    kept, dropped = [], []
+    for line in summary.splitlines():
+        unseen = [m for m in MOVE_RE.findall(line) if _move_key(m) not in seen]
+        (dropped if unseen else kept).append(f"{line}（原文未出现：{'、'.join(unseen)}）" if unseen else line)
+    return "\n".join(kept).strip(), dropped
+
+
+def summarize_reasoning(reasoning: str) -> tuple[str, list[str]]:
+    """把被截断的思考压缩成要点（不思考的独立调用），并删掉含原文没出现过的着法的行。
+    返回 (要点, 被删的行)；失败或为空时要点为空串，由调用方退回带末尾。"""
     if not reasoning.strip():
-        return ""
+        return "", []
     live.stage("整理被截断思考的要点")
     try:
         resp = client().chat.completions.create(
@@ -131,9 +163,12 @@ def summarize_reasoning(reasoning: str) -> str:
         summary = (resp.choices[0].message.content or "").strip()
     except Exception as e:  # 压缩只是补救手段，出错不能让这一步棋失败
         print(f"[SALVAGE] 要点整理失败：{e}")
-        return ""
+        return "", []
+    summary, dropped = drop_unseen_moves(summary, reasoning)
     print(f"[SALVAGE] 要点整理（{len(reasoning)} 字 -> {len(summary)} 字）：{summary[:200]}")
-    return summary
+    for line in dropped:
+        print(f"[SALVAGE] 删除含原文未出现着法的行：{line}")
+    return summary, dropped
 
 
 def _merge_truncated(msg, truncated: list[str]):

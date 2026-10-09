@@ -451,7 +451,7 @@ class GetMoveTest(unittest.TestCase):
 class TruncateSalvageTest(unittest.TestCase):
     """思考被截断（finish_reason=length、正文为空）后的降档补救。"""
 
-    REASONING = "开头分析 e4 和 d4……" + "x" * 5000 + "末尾：倾向 d4"
+    REASONING = "开头分析 e4 和 d4，Nfxd4 会被 cxd4 吃回……" + "x" * 5000 + "末尾：倾向 d4"
 
     def make_client(self, summary_reply):
         calls: list[dict] = []
@@ -473,7 +473,7 @@ class TruncateSalvageTest(unittest.TestCase):
         return calls
 
     def test_summary_passed_to_next_level(self):
-        calls = self.make_client("1. 候选：e4 可行，d4 可行\n3. 倾向 d4")
+        calls = self.make_client("1. 候选：e4 可行，d4 可行\n- Qxh7+：可行\n3. 倾向 d4")
         msg, level = llm.llm_call([{"role": "user", "content": "走一步"}], levels=["high", "low"])
         self.assertEqual(level, "low")
         self.assertEqual(len(calls), 3)  # high 截断 → 要点整理 → low
@@ -483,7 +483,21 @@ class TruncateSalvageTest(unittest.TestCase):
         self.assertIn("要点整理", retry)
         self.assertIn("倾向 d4", retry)
         self.assertNotIn("x" * 100, retry)  # 不再贴原始末尾
+        self.assertNotIn("Qxh7", retry)  # 原文没出现过的着法不给下棋模型
         self.assertIn("[被截断思考的要点整理]", msg.reasoning_content)
+        self.assertIn("Qxh7", msg.reasoning_content)  # 但日志里看得到被删的行
+
+    def test_drop_unseen_moves(self):
+        summary = ("1. 候选\n- Nxd4：被 cxd4 吃回\n- Bb5+：未算完\n- d8=Q 升变\n- O-O：可行\n"
+                   "2. 威胁：c6 格被控制，g5 兵步不检查\n3. 倾向 Nxd4")
+        kept, dropped = llm.drop_unseen_moves(summary, "Nfxd4? cxd4. 也想过 d8=Q+ 和 O-O")
+        self.assertIn("Nxd4：被 cxd4 吃回", kept)  # 忽略消歧字母：Nxd4 = Nfxd4
+        self.assertIn("d8=Q", kept)
+        self.assertIn("O-O", kept)
+        self.assertIn("c6 格", kept)  # 格子名、兵步不当作着法
+        self.assertIn("倾向 Nxd4", kept)
+        self.assertEqual(len(dropped), 1)
+        self.assertIn("Bb5", dropped[0])
 
     def test_summary_failure_falls_back_to_tail(self):
         calls = self.make_client(RuntimeError("boom"))
