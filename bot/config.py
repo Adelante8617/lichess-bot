@@ -64,7 +64,11 @@ THINK_LADDER = [x.strip().lower() for x in os.getenv("THINK_LADDER", "default").
     or ["default"]
 # 开局快速模式使用的档位；若在 THINK_LADDER 中，重试时从它往下降
 OPENING_EFFORT = os.getenv("OPENING_EFFORT", "off").strip().lower()
-# 思考被截断、没给出答案时，带回思考末尾多少字给下一档（0 = 不带回）
+# 思考被截断、没给出答案时怎么把已有分析交给下一档：
+# summary = 先用一次不思考的独立调用把整段思考压缩成要点；tail = 直接带回思考末尾；none = 不带回
+TRUNCATE_SALVAGE = os.getenv("TRUNCATE_SALVAGE", "summary").strip().lower()
+TRUNCATE_SUMMARY_MAX_TOKENS = int(os.getenv("TRUNCATE_SUMMARY_MAX_TOKENS", "1024"))
+# tail 模式带回的字数；summary 模式压缩失败时也退回带末尾这么多字（0 = 不带回）
 TRUNCATE_REASONING_TAIL = int(os.getenv("TRUNCATE_REASONING_TAIL", "4000"))
 # ---- 复杂度分流：每步先用一次不思考的独立调用判断复杂度，再按档位决定思考强度与 max_tokens ----
 COMPLEXITY_CHECK = os.getenv("COMPLEXITY_CHECK", "1") == "1"   # 0 = 关闭，回到 THINK_LADDER 全阶梯

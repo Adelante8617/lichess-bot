@@ -4,7 +4,8 @@ import json
 from openai import OpenAI
 
 from .config import (EFFORT_LEVELS, LLM_API_KEY, LLM_BASE_URL, LLM_EXTRA_BODY, LLM_MAX_TOKENS,
-                     LLM_TEMPERATURE, MODEL, THINK_LADDER, TRUNCATE_REASONING_TAIL)
+                     LLM_TEMPERATURE, MODEL, THINK_LADDER, TRUNCATE_REASONING_TAIL,
+                     TRUNCATE_SALVAGE, TRUNCATE_SUMMARY_MAX_TOKENS)
 from .live import live
 
 _client = None
@@ -67,7 +68,7 @@ def cap_ladder(levels: list[str], cap: str) -> list[str]:
 def llm_call(messages: list, tools: list | None = None, levels: list[str] | None = None,
              max_tokens: int | None = None):
     """下棋阶段统一的 LLM 调用，返回 (message, 实际使用的档位)。
-    从 levels[0] 开始；若思考把 max_tokens 用光、正文为空，则带回思考末尾、换下一档直接要结论。"""
+    从 levels[0] 开始；若思考把 max_tokens 用光、正文为空，则带回思考要点（或末尾）、换下一档直接要结论。"""
     levels = levels or THINK_LADDER[:1]
     max_tokens = max_tokens or LLM_MAX_TOKENS
     msgs, use_tools = messages, tools
@@ -85,18 +86,54 @@ def llm_call(messages: list, tools: list | None = None, levels: list[str] | None
         print(f"[WARN] 模型输出达到 max_tokens={max_tokens} 被截断（effort={level}）")
         if (msg.content or "").strip() or msg.tool_calls or i == len(levels) - 1:
             return _merge_truncated(msg, truncated), level
-        # 正文为空：带回思考末尾，降一档、不给工具，直接要最终 JSON
+        # 正文为空：把已有分析（压缩要点或思考末尾）带回，降一档、不给工具，直接要最终 JSON
         reasoning = reasoning_of(msg)
         truncated.append(f"[effort={level} 的思考，被截断]\n{reasoning}")
-        tail = reasoning[-TRUNCATE_REASONING_TAIL:] if TRUNCATE_REASONING_TAIL > 0 else ""
-        note = (f"你刚才的思考过长被截断，没有给出最终答案。以下是你思考的最后部分：\n{tail}\n\n"
-                if tail else "你刚才的思考过长被截断，没有给出最终答案。\n")
+        note = "你刚才的思考过长被截断，没有给出最终答案。\n"
+        summary = summarize_reasoning(reasoning) if TRUNCATE_SALVAGE == "summary" else ""
+        if summary:
+            truncated.append(f"[被截断思考的要点整理]\n{summary}")
+            note += f"以下是你此前思考的要点整理：\n{summary}\n\n"
+        elif TRUNCATE_SALVAGE != "none" and TRUNCATE_REASONING_TAIL > 0 and reasoning:
+            note += f"以下是你思考的最后部分：\n{reasoning[-TRUNCATE_REASONING_TAIL:]}\n\n"
         msgs = messages + [{"role": "user", "content": note +
                             "不要再展开新的计算，直接根据已有分析选定着法，按系统提示输出完整 JSON。"}]
         use_tools = None
         print(f"[SALVAGE] 思考被截断（{len(reasoning)} 字），降档 {level} -> {levels[i + 1]} 直接要结论")
         live.stage(f"思考过长被截断，降档到 {levels[i + 1]}")
     return msg, level
+
+
+SUMMARY_PROMPT = """下面是一段对国际象棋局面的思考过程，因为太长在中途被截断了。
+请把它压缩成要点，供思考者据此直接选定着法。只整理原文已有的内容，不要补充新的分析或计算。
+
+按下面几项列出（原文没涉及的项写"无"）：
+1. 考虑过的候选着法：每个一行，写清原文对它的结论（可行 / 被否决及原因 / 未算完）
+2. 发现的威胁与战术：对方的威胁、我方的战术机会、悬空或被攻击的子
+3. 目前倾向的着法及理由；若原文还没倾向，写最后正在分析的着法和进展
+
+总共不超过 400 字。
+
+【被截断的思考】
+{reasoning}"""
+
+
+def summarize_reasoning(reasoning: str) -> str:
+    """把被截断的思考压缩成要点（不思考的独立调用）；失败或为空时返回空串，由调用方退回带末尾。"""
+    if not reasoning.strip():
+        return ""
+    live.stage("整理被截断思考的要点")
+    try:
+        resp = client().chat.completions.create(
+            model=MODEL, temperature=LLM_TEMPERATURE, max_tokens=TRUNCATE_SUMMARY_MAX_TOKENS,
+            messages=[{"role": "user", "content": SUMMARY_PROMPT.format(reasoning=reasoning)}],
+            **effort_kwargs("off"))
+        summary = (resp.choices[0].message.content or "").strip()
+    except Exception as e:  # 压缩只是补救手段，出错不能让这一步棋失败
+        print(f"[SALVAGE] 要点整理失败：{e}")
+        return ""
+    print(f"[SALVAGE] 要点整理（{len(reasoning)} 字 -> {len(summary)} 字）：{summary[:200]}")
+    return summary
 
 
 def _merge_truncated(msg, truncated: list[str]):

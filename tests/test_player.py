@@ -17,7 +17,8 @@ os.chdir(tempfile.mkdtemp(prefix="lichess-bot-test-"))
 os.environ.update({"AUTO_RECALL_K": "0", "SELF_CHECK_ROUNDS": "2", "OPENING_FAST_MOVES": "0",
                    "COMPLEXITY_CHECK": "1", "THINK_LADDER": "default", "MATERIAL_LEAD_SKIP": "12",
                    "BOARD_RELATIONS": "0", "ANALYSIS_BOARD": "0", "PLAN_MEMORY": "1",
-                   "HANG_GUARD": "1", "HANG_GUARD_MIN": "2", "HANG_GUARD_ROUNDS": "2"})
+                   "HANG_GUARD": "1", "HANG_GUARD_MIN": "2", "HANG_GUARD_ROUNDS": "2",
+                   "TRUNCATE_SALVAGE": "summary", "TRUNCATE_REASONING_TAIL": "4000"})
 
 import chess  # noqa: E402
 
@@ -445,6 +446,52 @@ class GetMoveTest(unittest.TestCase):
         llm._client = FakeClient({"move": "Ke2"}, [])
         uci, *_ = player.get_llm_move(board, 1, None, None)
         self.assertIn(chess.Move.from_uci(uci), board.legal_moves)
+
+
+class TruncateSalvageTest(unittest.TestCase):
+    """思考被截断（finish_reason=length、正文为空）后的降档补救。"""
+
+    REASONING = "开头分析 e4 和 d4……" + "x" * 5000 + "末尾：倾向 d4"
+
+    def make_client(self, summary_reply):
+        calls: list[dict] = []
+
+        def create(**kw):
+            calls.append(kw)
+            if "被截断的思考" in kw["messages"][-1]["content"]:
+                if isinstance(summary_reply, Exception):
+                    raise summary_reply
+                return _msg(summary_reply)
+            if len(calls) == 1:  # 第一档：思考用光 max_tokens，正文为空
+                resp = _msg("", finish="length")
+                resp.choices[0].message.reasoning_content = self.REASONING
+                return resp
+            return _msg(json.dumps({"move": "d4"}))
+
+        llm._client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
+        return calls
+
+    def test_summary_passed_to_next_level(self):
+        calls = self.make_client("1. 候选：e4 可行，d4 可行\n3. 倾向 d4")
+        msg, level = llm.llm_call([{"role": "user", "content": "走一步"}], levels=["high", "low"])
+        self.assertEqual(level, "low")
+        self.assertEqual(len(calls), 3)  # high 截断 → 要点整理 → low
+        self.assertEqual(calls[1]["extra_body"]["thinking"], {"type": "disabled"})
+        self.assertIn(self.REASONING, calls[1]["messages"][-1]["content"])  # 整理用的是完整思考
+        retry = calls[2]["messages"][-1]["content"]
+        self.assertIn("要点整理", retry)
+        self.assertIn("倾向 d4", retry)
+        self.assertNotIn("x" * 100, retry)  # 不再贴原始末尾
+        self.assertIn("[被截断思考的要点整理]", msg.reasoning_content)
+
+    def test_summary_failure_falls_back_to_tail(self):
+        calls = self.make_client(RuntimeError("boom"))
+        _, level = llm.llm_call([{"role": "user", "content": "走一步"}], levels=["high", "low"])
+        self.assertEqual(level, "low")
+        retry = calls[-1]["messages"][-1]["content"]
+        self.assertIn("思考的最后部分", retry)
+        self.assertIn("末尾：倾向 d4", retry)
 
 
 if __name__ == "__main__":
