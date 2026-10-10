@@ -452,7 +452,15 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
     plan = recall_plan(board)
     prog = line_progress(board, plan) if PV_MEMORY else None
     followed = bool(prog and prog["next"] is not None)
-    following = followed and safe_shortcut(prog["next"])
+    # 主变的下一步按吃子交换模拟会丢子（连杀主变除外，已按规则摆到将杀）：上一步的计算可能有误，
+    # 不直接走、不降档，把模拟结果交给模型从当前盘面重新算
+    next_hang = ""
+    if followed and HANG_GUARD and not plan["mate"]:
+        risk = material_risk(board, prog["next"])
+        if risk["loss"] >= HANG_GUARD_MIN:
+            next_hang = risk_text(board, prog["next"], risk)
+            print(f"[PV] 对方按主变应着，但主变下一步会丢子，重新推理：{next_hang}")
+    following = followed and not next_hang and safe_shortcut(prog["next"])
     if following:
         if plan["mate"]:
             return play_line_move(board, ply, plan, prog, "主变是连杀，对方按计算应着")
@@ -539,7 +547,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         recalled=recall_section, legal_sans=legal_sans, fast=fast,
         complexity=complexity, complexity_reason=complexity_reason,
         prev_line=prev_line_section(prog["line_san"], plan["goal"], prog["expected"], prog["actual"],
-                                    display_san(board, prog["next"]) if followed else "")
+                                    display_san(board, prog["next"]) if followed else "", next_hang)
         if prog else "",
         mate_threat=opp_threat)
 

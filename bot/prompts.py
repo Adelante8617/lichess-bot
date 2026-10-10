@@ -177,12 +177,19 @@ def user_prompt(*, board_text: str, last_move: str, history: str, my_color: str,
 请按系统提示输出完整 JSON。"""
 
 
-def prev_line_section(line: list[str], goal: str, expected: str, actual: str, next_move: str) -> str:
+def prev_line_section(line: list[str], goal: str, expected: str, actual: str, next_move: str,
+                      next_hang: str = "") -> str:
     """上一步算出的主变（SAN，第一步是上一步我方走的着）及其目的。
-    next_move 非空：对方按主变应着，计划中的下一步是它；为空：对方偏离了主变。"""
+    next_move 非空：对方按主变应着，计划中的下一步是它；为空：对方偏离了主变。
+    next_hang：程序模拟出计划中的下一步会丢子时的事实描述，此时要求重新计算而不是确认。"""
     head = ("\n==== 你上一步算出的主变 ====\n"
             f"主变：{' '.join(line)}\n"
             f"目的：{goal or '（上一步没有写明）'}\n")
+    if next_move and next_hang:
+        return head + (f"对方按你的计算走了 {actual}，计划中的下一步是 {next_move}。\n"
+                       f"但程序的吃子交换模拟显示：{next_hang}\n"
+                       f"上一步的计算可能漏看了这一点。不要因为 {next_move} 在主变里就走它，"
+                       f"从当前盘面重新计算，确认它真的成立（有模拟没算到的手段）才走，否则另选。\n")
     if next_move:
         return head + (f"对方按你的计算走了 {actual}，计划中的下一步是 {next_move}。\n"
                        f"先对照当前盘面确认上面的目的仍然成立；成立就走 {next_move}，不必从头重新计算，"

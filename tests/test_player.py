@@ -785,6 +785,44 @@ class LineMemoryTest(unittest.TestCase):
         self.assertIn("出子攻击 e5", decision_prompt)
         self.assertIn("对方按上一步主变应着", obs["complexity_reason"])
 
+    def hanging_plan_board(self) -> chess.Board:
+        """日志 20261010_012422 白第 25 步主变 Rxe2 Qxc3 Qxd7：对方按主变应了 Qxc3，
+        但 e6 象保护 d7，Qxd7 会被 Bxd7 吃后。"""
+        board = chess.Board(PLY47)
+        for san in ["Rc3", "Rxe2", "Rxe2"]:
+            board.push_san(san)
+        moves = [m.uci() for m in board.move_stack]
+        line = [board.peek().uci(), "a5c3", "c6d7"]
+        player._plans[chess.WHITE] = {"moves": moves, "strategy": "兑车后吃马", "line": line, "mate": False,
+                                      "goal": "兑车后 Qxd7 得子"}
+        board.push_san("Qxc3")
+        return board
+
+    def test_hanging_next_move_is_rethought(self):
+        board = self.hanging_plan_board()
+        llm._client = FakeClient({"think": "x", "move": "d4"}, [keep("d4")])
+        uci, _, _, obs = player.get_llm_move(board, board.ply() + 1, None, "a5c3")
+        self.assertEqual(uci, "d3d4")
+        # 不降档：照常做复杂度判断
+        self.assertTrue(any("只判断当前局面的复杂度" in p for p in llm._client.prompts))
+        self.assertNotIn("对方按上一步主变应着", obs.get("complexity_reason", ""))
+        decision_prompt = next(p for p in llm._client.prompts if "【当前局面，轮到你走】" in p)
+        self.assertIn("计划中的下一步是 Qxd7", decision_prompt)
+        self.assertIn("Bxd7", decision_prompt)
+        self.assertNotIn("不必从头重新计算", decision_prompt)
+
+    def test_hanging_next_move_not_played_as_only_reply(self):
+        board = self.hanging_plan_board()
+        original = player.line_progress
+        player.line_progress = lambda b, plan: dict(original(b, plan), only_reply=True)
+        try:
+            llm._client = FakeClient({"think": "x", "move": "d4"}, [keep("d4")])
+            uci, *_ = player.get_llm_move(board, board.ply() + 1, None, "a5c3")
+        finally:
+            player.line_progress = original
+        self.assertEqual(uci, "d3d4")
+        self.assertTrue(llm._client.prompts)
+
     def test_invalid_pv_is_truncated(self):
         board = chess.Board()
         self.first_move(board, {"think": "x", "pv": ["e4", "e5", "Ke3", "Nf3"], "move": "e4"})
