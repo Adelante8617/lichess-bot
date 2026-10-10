@@ -143,6 +143,16 @@ class MaterialRiskTest(unittest.TestCase):
         self.assertLess(guard.material_risk(board, board.parse_san("exd5"))["loss"], 0)
 
 
+class LastMoveTest(unittest.TestCase):
+    def test_discovered_attack_is_described(self):
+        # ply 64：...Bh8 让开 f 线，Rf7 与 Be4 一起攻 f3 马
+        prev = chess.Board("r7/1p3r1k/3p1bpp/P1nP4/2P1b1B1/4PNPP/8/R3R1K1 b - - 4 32")
+        text = player.describe_last_move(prev, "f6h8")
+        self.assertIn("让开了线路", text)
+        self.assertIn("车 f7 现在攻击白方的 马 f3", text)
+        self.assertNotIn("让开", player.describe_last_move(chess.Board(), "e2e4"))
+
+
 class HangGuardTest(unittest.TestCase):
     def setUp(self):
         self.board = chess.Board(PLY21)

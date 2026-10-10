@@ -98,7 +98,27 @@ def describe_last_move(prev_board: chess.Board, uci: str) -> str:
         parts.append(f"，升变为{PIECE_ZH[mv.promotion]}")
     if prev_board.is_castling(mv):
         parts.append("，王车易位")
+    opened = discovered_attacks(prev_board, mv)
+    if opened:
+        parts.append("。这步让开了线路（闪击）：" + "；".join(opened))
     return "".join(parts)
+
+
+def discovered_attacks(prev_board: chess.Board, mv: chess.Move) -> list[str]:
+    """走 mv 的一方，除了走动的子以外，哪些车象后因为线路被让开，新攻击到了对方的子（按规则判定的事实）。"""
+    mover, victim = prev_board.turn, not prev_board.turn
+    after = prev_board.copy(stack=False)
+    after.push(mv)
+    out = []
+    for sq in chess.SquareSet(after.occupied_co[mover]) - chess.SquareSet.from_square(mv.to_square):
+        if after.piece_type_at(sq) not in (chess.BISHOP, chess.ROOK, chess.QUEEN):
+            continue
+        new = (after.attacks(sq) - prev_board.attacks(sq)) & after.occupied_co[victim]
+        if new:
+            targets = "、".join(f"{PIECE_ZH[after.piece_type_at(t)]} {chess.square_name(t)}" for t in new)
+            out.append(f"{COLOR_ZH[mover]}{PIECE_ZH[after.piece_type_at(sq)]} {chess.square_name(sq)} "
+                       f"现在攻击{COLOR_ZH[victim]}的 {targets}")
+    return out
 
 
 def board_meta(board: chess.Board) -> str:
