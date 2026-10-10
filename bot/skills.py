@@ -15,7 +15,7 @@ import threading
 
 import chess
 
-from .boardtext import game_phase, material_lead
+from .boardtext import PIECE_VALUES, game_phase, material_lead
 from .config import SKILL_AUTO_MAX, SKILL_STATS_PATH, SKILLS_DIR
 from .guard import en_prise
 
@@ -59,6 +59,67 @@ def threatened_count(board: chess.Board) -> int:
 def threatened(board: chess.Board) -> bool:
     """轮到走的一方有没有马、象、车、后被对方的吃子交换净赚。"""
     return threatened_count(board) > 0
+
+
+def _aligned(pt: int, a: int, b: int) -> bool:
+    """pt 类长兵器（象 / 车 / 后）能不能沿直线从 a 打到 b（不管中间有没有子）。"""
+    same_line = chess.square_file(a) == chess.square_file(b) or chess.square_rank(a) == chess.square_rank(b)
+    diagonal = abs(chess.square_file(a) - chess.square_file(b)) == abs(chess.square_rank(a) - chess.square_rank(b))
+    return a != b and ((pt in (chess.ROOK, chess.QUEEN) and same_line) or (pt in (chess.BISHOP, chess.QUEEN) and diagonal))
+
+
+def line_tactic(board: chess.Board, color: bool) -> bool:
+    """color 一方的象 / 车 / 后与对方的王、后、车在同一条线上，中间正好隔一个马象车后：
+    隔的是对方的子 → 牵制 / 串击；隔的是自己的子 → 闪击（挪开它就打到后面的子）。
+    只算后面的目标是王、或比这个长兵器值钱的子（象瞄车、车瞄后），自己的子挡线时目标是王或后也算。"""
+    for pt in (chess.BISHOP, chess.ROOK, chess.QUEEN):
+        for sq in board.pieces(pt, color):
+            for tpt in (chess.KING, chess.QUEEN, chess.ROOK):
+                for target in board.pieces(tpt, not color):
+                    if not _aligned(pt, sq, target):
+                        continue
+                    between = chess.SquareSet(chess.between(sq, target)) & board.occupied
+                    if len(between) != 1:
+                        continue
+                    blocker = board.piece_at(between.pop())
+                    if blocker.piece_type in (chess.PAWN, chess.KING):
+                        continue
+                    if tpt == chess.KING or PIECE_VALUES[tpt] > PIECE_VALUES[pt] \
+                            or (blocker.color == color and tpt == chess.QUEEN):
+                        return True
+    return False
+
+
+def back_rank_weak(board: chess.Board, color: bool) -> bool:
+    """color 一方的王在底线，往前一排的出路全被自己的子堵住或被对方控制，且对方有车或后，
+    并且底线上没有自己的车 / 后守着、或对方的车 / 后已经打到底线：底线杀的形状。"""
+    king = board.king(color)
+    home = 0 if color == chess.WHITE else 7
+    if king is None or chess.square_rank(king) != home:
+        return False
+    if not (board.pieces(chess.ROOK, not color) or board.pieces(chess.QUEEN, not color)):
+        return False
+    front = home + (1 if color == chess.WHITE else -1)
+    for f in range(max(0, chess.square_file(king) - 1), min(7, chess.square_file(king) + 1) + 1):
+        sq = chess.square(f, front)
+        piece = board.piece_at(sq)
+        if (piece is None or piece.color != color) and not board.is_attacked_by(not color, sq):
+            return False
+    rank = chess.SquareSet(chess.BB_RANKS[home])
+    guarded = bool((board.pieces(chess.ROOK, color) | board.pieces(chess.QUEEN, color)) & rank)
+    heavy = board.pieces(chess.ROOK, not color) | board.pieces(chess.QUEEN, not color)
+    reached = any(board.attacks(sq) & rank for sq in heavy)
+    return reached or not guarded
+
+
+def _sides(v) -> list[str]:
+    """"me" / "opp" / "any" → 要检查的一方；true 当作 any。"""
+    v = "any" if v is True else str(v)
+    return ["me", "opp"] if v == "any" else [v]
+
+
+def _either(fn, board: chess.Board, v) -> bool:
+    return any(fn(board, board.turn if side == "me" else not board.turn) for side in _sides(v))
 
 
 def passer_rank(board: chess.Board, color: bool) -> int:
@@ -110,6 +171,8 @@ PREDICATES = {
     "threatened_min": lambda b, v: threatened_count(b) >= int(v),             # 这样受威胁的子至少几个（2 = 被双攻）
     "opp_passer_min": lambda b, v: passer_rank(b, not b.turn) >= int(v),      # 对方通路兵已到第几横排（对方视角）
     "my_passer_min": lambda b, v: passer_rank(b, b.turn) >= int(v),
+    "line_tactic": lambda b, v: _either(line_tactic, b, v),                   # me / opp / any：长兵器隔一子瞄王后车
+    "back_rank_weak": lambda b, v: _either(back_rank_weak, b, v),             # me / opp / any：王在底线被自己的兵堵住
     "my_color": lambda b, v: ("white" if b.turn == chess.WHITE else "black") in _as_list(v),
     "opening": lambda b, v: any((san_moves(b) + " ").startswith(p.strip() + " ") for p in _as_list(v)),
 }
@@ -129,6 +192,8 @@ PREDICATE_DOCS = {
     "threatened": "true / false：对方现在就能用吃子交换净赚我方的马象车后（被更低价值的子攻击、没有保护、或攻击多于保护）",
     "threatened_min": "整数：上面这样受威胁的马象车后至少有几个（2 表示被双攻 / 叉子）",
     "opp_passer_min / my_passer_min": "对方 / 我方最靠前的通路兵已到第几横排（整数 1-8，按该方视角）",
+    "line_tactic": '"me" / "opp" / "any"：这一方的象车后与对方王 / 后 / 车同线、中间正好隔一个子（牵制、串击、闪击）',
+    "back_rank_weak": '"me" / "opp" / "any"：这一方的王在底线、出路被堵，且底线没有车后守着或对方车后已打到底线',
     "my_color": '"white" / "black"',
     "opening": '对局着法以其中之一开头（纯 SAN 前缀列表，如 ["e4 e6"]）',
 }

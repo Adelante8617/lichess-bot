@@ -84,6 +84,22 @@ class PredicateTest(unittest.TestCase):
         self.assertTrue(self.check("threatened_min", 2, board))
         self.assertIn("fork-damage-control", [s["name"] for s in skills.match_skills(board, skills.load_skills(testenv.SKILLS_ROOT))])
 
+    def test_line_tactic(self):
+        board = board_after("e4", "e5", "Nf3", "Nc6", "Bb5", "d6")  # Bb5 钉住 c6 马（王 e8 在后）
+        self.assertTrue(self.check("line_tactic", "me", board))  # 轮到白走，我方 = 白
+        self.assertFalse(self.check("line_tactic", "opp", board))
+        self.assertFalse(self.check("line_tactic", "any", chess.Board()))
+        # 闪击：白车 e1 → 白马 e4 → 黑后 e7
+        board = chess.Board("4k3/4q3/8/8/4N3/8/8/4R1K1 w - - 0 1")
+        self.assertTrue(self.check("line_tactic", "me", board))
+
+    def test_back_rank_weak(self):
+        board = chess.Board("6k1/5ppp/8/8/8/8/5PPP/R5K1 b - - 0 1")
+        self.assertTrue(self.check("back_rank_weak", "me", board))   # 黑王 g8 被兵堵住，白有车
+        self.assertFalse(self.check("back_rank_weak", "opp", board))  # 黑方没有车后
+        guarded = chess.Board("r5k1/5ppp/8/8/8/8/5PPP/6K1 w - - 0 1")
+        self.assertFalse(skills.back_rank_weak(guarded, chess.BLACK))  # 对方没有车后
+
     def test_passer_rank(self):
         board = chess.Board("8/2P5/8/8/8/8/5k2/K7 b - - 0 1")
         self.assertEqual(skills.passer_rank(board, chess.WHITE), 7)
