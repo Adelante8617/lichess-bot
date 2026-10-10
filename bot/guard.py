@@ -70,6 +70,44 @@ def en_prise(board: chess.Board) -> list[int]:
             for sq in board.pieces(pt, me) if _exchange(opp, sq)[0] > 0]
 
 
+def double_attacks(board: chess.Board) -> list[tuple[chess.Move, list[int]]]:
+    """轮到走的一方一步就能形成的双攻：走完后，走动的那个子同时打到对方两个以上"能净赚"的目标
+    （王算一个目标，即将军；其余是我方在那格发起吃子交换能净赚的马象车后，兵不算），且走动的子本身不会被对方净赚吃掉。
+    只陈述"同时攻击到了"这个事实，对方能不能带先手解围、反捉，由模型自己算。"""
+    out = []
+    for mv in board.legal_moves:
+        after = board.copy(stack=False)
+        after.push(mv)
+        if after.is_checkmate() or _exchange(after, mv.to_square)[0] > 0:
+            continue
+        mine = _passed(after)  # 假设对方不应，我方再走一步能吃到什么
+        targets = [sq for sq in chess.SquareSet(after.attacks(mv.to_square)) & after.occupied_co[after.turn]
+                   if after.piece_type_at(sq) == chess.KING
+                   or (after.piece_type_at(sq) != chess.PAWN and _exchange(mine, sq)[0] > 0)]
+        if len(targets) >= 2:
+            out.append((mv, targets))
+    return out
+
+
+def double_attack_text(board: chess.Board) -> str:
+    """双方一步可形成的双攻，写成给模型看的事实；都没有返回空字符串。
+    对方那一侧按"假设我方空走一步"计算，被将军时空着不合法，只列我方。"""
+    def fmt(b: chess.Board, items) -> str:
+        return "；".join(f"{display_san(b, mv)}（同时攻击 "
+                        + "、".join(f"{PIECE_ZH[b.piece_type_at(t)]} {chess.square_name(t)}" for t in targets)
+                        + "）" for mv, targets in items)
+    lines = []
+    mine = double_attacks(board)
+    if mine:
+        lines.append(f"- 我方一步可形成的双攻：{fmt(board, mine)}")
+    if not board.is_check():
+        opp_board = _passed(board)
+        theirs = double_attacks(opp_board)
+        if theirs:
+            lines.append(f"- 对方下一步可形成的双攻（假设我方这步不管）：{fmt(opp_board, theirs)}")
+    return "\n".join(lines)
+
+
 def material_risk(board: chess.Board, move: chess.Move) -> dict:
     """走 move 之后，对方用一次吃子交换能让我方净亏多少（已扣除 move 本身吃到的子）。
     返回 {"loss": 净亏分数（≤0 表示不亏）, "line": 对方的最优交换序列, "square": 交换发生的格,

@@ -112,6 +112,8 @@ class SelfCheckTest(unittest.TestCase):
 PLY21 = "r1bq1rk1/1p3pp1/p1nbpn1p/3p4/3P4/2NBBN2/PPP2PPP/R2QR1K1 w - - 0 11"
 # 日志 20261010_173535 的 ply 65：h8 象攻 a1 车（Re1 保护），Be4 + Rf7 攻 f3 马（Bg4 保护）
 PLY65 = "r6b/1p3r1k/3p2pp/P1nP4/2P1b1B1/4PNPP/8/R3R1K1 w - - 5 33"
+# 同一局 ply 87：b1 黑象攻 a2 车；Rb2 同时攻无根的 b1 象、b3 马
+PLY87 = "r4r2/8/Pp1pB2k/3P2pp/2P5/1n2P1PP/R3N3/1b4K1 w - - 5 44"
 
 
 class MaterialRiskTest(unittest.TestCase):
@@ -136,6 +138,16 @@ class MaterialRiskTest(unittest.TestCase):
         self.assertEqual((r["loss"], r["square"], r["preexisting"]), (2, "a1", True))
         self.assertFalse(self.risk(PLY21, "Bg5")["preexisting"])  # 走到被兵控制的格：是这步造成的
         self.assertEqual(sorted(chess.square_name(s) for s in guard.en_prise(chess.Board(PLY65))), ["a1", "f3"])
+
+    def test_double_attacks(self):
+        # 日志 20261010_173535 第 44 步：Rb2 同时打无根的 b1 象与 b3 马（实战走了 Ra3）
+        board = chess.Board(PLY87)
+        mine = {board.san(mv): sorted(chess.square_name(t) for t in ts) for mv, ts in guard.double_attacks(board)}
+        self.assertEqual(mine.get("Rb2"), ["b1", "b3"])
+        text = guard.double_attack_text(chess.Board(PLY65))  # 对方 Bc3 同时打 a1、e1 两车
+        self.assertIn("对方下一步可形成的双攻", text)
+        self.assertIn("Bc3（同时攻击 车 a1、车 e1）", text)
+        self.assertEqual(guard.double_attack_text(chess.Board()), "")
 
     def test_favorable_capture_not_flagged(self):
         # 兵吃马、马再吃回：净赚 2，不算丢子

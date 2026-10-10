@@ -11,11 +11,12 @@ from .boardtext import (COLOR_ZH, board_meta, describe_last_move, display_san, l
                         material_lead, parse_model_move, piece_lists, render_board, san_history,
                         strip_check)
 from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, BOOK_ENABLED, COMPLEXITY_CHECK,
-                     COMPLEXITY_DEFAULT, COMPLEXITY_PROFILE, HANG_GUARD, HANG_GUARD_MIN, LLM_MAX_TOKENS,
+                     COMPLEXITY_DEFAULT, COMPLEXITY_PROFILE, DOUBLE_ATTACK_FACTS, HANG_GUARD, HANG_GUARD_MIN,
+                     LLM_MAX_TOKENS,
                      MATERIAL_LEAD_EFFORT, MATERIAL_LEAD_SKIP, MATE_GUARD, OPENING_EFFORT, OPENING_FAST_MOVES,
                      PLAN_MEMORY, PV_FOLLOW_EFFORT, PV_MEMORY, SELF_CHECK_EFFORT, STRATEGY_STAGE,
                      STRATEGY_STAGE_MAX_TOKENS, TOOL_ROUNDS)
-from .guard import allows_mate, mate_in_one, mate_threat, material_risk, risk_text
+from .guard import allows_mate, double_attack_text, mate_in_one, mate_threat, material_risk, risk_text
 from .hooks import MoveContext, run_pre_move
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
@@ -321,7 +322,8 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         prev_line=prev_line_section(prog["line_san"], plan["goal"], prog["expected"], prog["actual"],
                                     display_san(board, prog["next"]) if followed else "", next_hang)
         if prog else "",
-        mate_threat=opp_threat, skill_text=skills.section_text(skill_hits))
+        mate_threat=opp_threat, skill_text=skills.section_text(skill_hits),
+        double_attacks=double_attack_text(board) if DOUBLE_ATTACK_FACTS else "")
 
     messages = [
         {"role": "system", "content": system_prompt()},

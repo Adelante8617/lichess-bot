@@ -66,6 +66,9 @@ SYSTEM_PROMPT = """你是一个国际象棋 AI。每一步按下面的流程思�
     这类以小换大的吃子是重要的候选，不要因为"会被吃回"就放弃。
   · 用高价值子吃被保护的低价值子是亏的：象吃被兵保护的兵 = 3 换 1。吃子前必须确认对方能不能吃回、吃回之后谁赚。
   · 同理，我方高价值子被对方低价值子攻击时，即使有保护也要处理（被吃后吃回仍然亏）；对方高价值子被我方低价值子攻击，就是我的机会。
+  · 比较候选时两边都要算：这步会丢什么，也要算这步威胁什么、对方最好的应对之后我净得多少。
+    能得一个子（3 分）的着法，丢一个兵（1 分）也划算，哪怕是第 6、7 横排的通路兵；
+    但要先确认对方没有带先手的解围（逃开的子反捉我方无根子、将军），否则"必得一子"不成立。
 - 兵只能斜着向前吃子：白兵向第 8 横排方向走，吃左前 / 右前一格（e4 兵控制 d5、f5）；
   黑兵向第 1 横排方向走，吃左下 / 右下一格（h6 黑兵控制 g5，b7 黑兵控制 a6、c6）。把子走到对方兵控制的格上，就是送给兵吃。
 - 王无法通过吃掉被保护的将军棋子来应将，这有可能导致被将杀。
@@ -145,13 +148,19 @@ def user_prompt(*, board_text: str, last_move: str, history: str, my_color: str,
                 opp_pieces: str, meta: str, ply: int, relations: str, prev_strategy: str | None,
                 recalled: str, legal_sans: list[str], fast: bool, complexity: str,
                 complexity_reason: str, prev_line: str = "", mate_threat: bool = False,
-                skill_text: str = "") -> str:
+                skill_text: str = "", double_attacks: str = "") -> str:
     """每一步的局面描述。relations 为空表示不附子力关系；prev_strategy 为 None 表示不带上一步方针；
     prev_line 为 prev_line_section() 的结果，空表示没有可用的上一步主变；
     mate_threat：程序查到对方有一步杀威胁，只提醒存在，不给着法；
     skill_text：按局面自动加载的技能正文（skills.section_text），空表示没有命中；
+    double_attacks：guard.double_attack_text 的结果，双方一步可形成的双攻，空表示没有；
     recalled：经验库自动召回，只在 EXPERIENCE_IN_PLAY 时出现。"""
     aid = MATE_THREAT_NOTE if mate_threat else ""
+    if double_attacks:
+        aid += ("\n==== 双攻（程序按规则列出：走完后同一个子同时打到两个能净赚的目标）====\n"
+                f"{double_attacks}\n"
+                "我方的双攻是候选机会，但要算对方能否带先手解围（逃开的子反捉我方无根子、将军）；"
+                "对方的双攻是要预防的威胁，候选走完后也要确认没有给对方留下双攻。\n")
     if relations:
         aid += f"\n==== 子力关系（程序按规则列出的原始事实，不含任何判断）====\n{relations}\n"
     if prev_strategy is not None:

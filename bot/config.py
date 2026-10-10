@@ -51,6 +51,7 @@ WAIT_TIMEOUT_SEC = int(os.getenv("WAIT_TIMEOUT_SEC", "60"))
 
 # 棋盘辅助（默认全关，关闭时行为与原来完全一致）。程序只提供原始关系与摆棋，不做任何判断
 BOARD_RELATIONS = os.getenv("BOARD_RELATIONS", "0") == "1"   # prompt 附上子力关系图
+DOUBLE_ATTACK_FACTS = os.getenv("DOUBLE_ATTACK_FACTS", "1") == "1"  # prompt 附上双方一步可形成的双攻（按规则列出）
 ANALYSIS_BOARD = os.getenv("ANALYSIS_BOARD", "0") == "1"     # 提供 play_line 分析棋盘工具
 PLAN_MEMORY = os.getenv("PLAN_MEMORY", "1") == "1"           # 把上一步定下的战略方针带给下一步
 # 把上一步算出的主变 pv 及其目的带给下一步：对方按主变应着时续走（连杀 / 对方唯一应着时不调 LLM 直接走），
