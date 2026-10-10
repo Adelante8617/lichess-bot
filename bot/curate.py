@@ -2,6 +2,7 @@
 
 1. 归类：分批把还没整理过的教训交给模型，归到现有技能、提议新技能（new:<名字>），或丢弃（太笼统、
    与系统提示里的行棋原则重复、只针对某一盘的具体着法）；
+   各批并行、互相看不到对方起的新名字，归类完再用一次调用合并同义的新名字（也可并入现有技能）；
 2. 改写：每个分到教训的技能，连同它的赛后统计，让模型在原文基础上改写（合并重复、补充新做法、删掉被证伪的），
    正文有长度上限；
 3. 新建：同一个新名字下攒够 min_new 条教训才起草新技能，不够的留到下次；
@@ -14,7 +15,9 @@ import difflib
 import json
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import skills
 from .config import MODEL, REVIEW_WORKERS, SKILL_STATS_PATH
@@ -158,6 +161,104 @@ when 要尽量准确地描述这类局面（命中太宽会在无关局面里占
     return text
 
 
+class Progress:
+    """终端进度条（不依赖 tqdm），线程安全：  [归类] ██████░░░░░░░░░░░░ 3/8  37%
+    输出不是终端（重定向到文件）时每完成一项打印一行，避免 \\r 刷出一堆乱码。"""
+
+    def __init__(self, label: str, total: int, width: int = 24):
+        self.label, self.total, self.width = label, total, width
+        self.done = 0
+        self.lock = threading.Lock()
+        self.tty = sys.stdout.isatty()
+        self._render()
+
+    def step(self):
+        with self.lock:
+            self.done += 1
+            self._render()
+
+    def _render(self):
+        if self.total <= 0:
+            return
+        filled = self.width * self.done // self.total
+        line = (f"[{self.label}] {'█' * filled}{'░' * (self.width - filled)} "
+                f"{self.done}/{self.total} {100 * self.done // self.total:3d}%")
+        if self.tty:
+            sys.stdout.write("\r" + line + ("\n" if self.done >= self.total else ""))
+            sys.stdout.flush()
+        elif self.done:
+            print(line)
+
+
+def run_parallel(fn, items: list, label: str) -> list:
+    """用 REVIEW_WORKERS 个线程对每项执行 fn，显示进度，按原顺序返回结果。
+    单项抛异常时结果为 None（调用方按"没有结果"处理），不影响其他项。"""
+    results: list = [None] * len(items)
+    if not items:
+        return results
+    progress = Progress(label, len(items))
+    with ThreadPoolExecutor(max_workers=max(1, REVIEW_WORKERS)) as pool:
+        futures = {pool.submit(fn, item): i for i, item in enumerate(items)}
+        for fut in as_completed(futures):
+            try:
+                results[futures[fut]] = fut.result()
+            except Exception as e:
+                print(f"\n[CURATE] {label} 第 {futures[fut] + 1} 项失败：{e}")
+            progress.step()
+    return results
+
+
+def merge_new_names(groups: dict[str, list[dict]], current: dict, index: str) -> dict[str, str]:
+    """各批归类时独立起的新主题名，让模型一次性合并同义的（也可以并入现有技能）。
+    原地修改 groups，返回 {旧名: 新去向}。少于 2 个新名字、或模型回答无效时不改。"""
+    new_names = sorted(k for k in groups if k.startswith("new:"))
+    if len(new_names) < 2:
+        return {}
+    listing = "\n".join(f"- {n}（{len(groups[n])} 条）：" + "；".join(_clean(e["text"])[:50] for e in groups[n][:3])
+                        for n in new_names)
+    prompt = f"""下面是把国际象棋教训分批归类时，各批分别提议的新主题名字（每个附最多 3 条教训示例）。
+因为各批互相看不到，同一主题可能起了不同的名字。
+
+新主题名字：
+{listing}
+
+现有技能（name：说明）：
+{index or '（还没有技能）'}
+
+请合并同义或高度重叠的新主题：把每个需要改名的新名字映射到另一个新名字（保留的那个），
+或者映射到某个现有技能的 name（这个主题其实已被现有技能覆盖）。不需要改的不要列出。
+
+严格输出 JSON（不要 markdown）：{{"merge": {{"new:旧名字": "new:保留的名字 或 现有技能名"}}}}"""
+    print(f"[CURATE] 合并新主题名字（{len(new_names)} 个）...")
+    try:
+        obj = extract_json(_ask(prompt)) or {}
+    except Exception as e:
+        print(f"[CURATE] 合并新主题名字失败：{e}")
+        return {}
+    raw = obj.get("merge") if isinstance(obj.get("merge"), dict) else {}
+    valid = set(new_names) | set(current)
+    mapping = {str(k).strip(): str(v).strip() for k, v in raw.items()
+               if str(k).strip() in new_names and str(v).strip() in valid and str(k).strip() != str(v).strip()}
+
+    def resolve(name: str) -> str:  # 处理 a→b、b→c 这样的链，防止成环
+        seen = {name}
+        while name in mapping and mapping[name] not in seen:
+            name = mapping[name]
+            seen.add(name)
+        return name
+
+    renamed = {}
+    for old in list(mapping):
+        target = resolve(old)
+        if target == old or old not in groups:
+            continue
+        groups.setdefault(target, []).extend(groups.pop(old))
+        renamed[old] = target
+    if renamed:
+        print("[CURATE] 合并：" + "，".join(f"{a} → {b}" for a, b in renamed.items()))
+    return renamed
+
+
 def _load_stats() -> dict:
     try:
         with open(SKILL_STATS_PATH, encoding="utf-8") as f:
@@ -177,15 +278,16 @@ def curate(root: str | None = None, batch_size: int = 30, min_new: int = 3, limi
     print(f"[CURATE] 待整理教训 {len(lessons)} 条，现有技能 {len(current)} 个")
 
     batches = [lessons[i:i + batch_size] for i in range(0, len(lessons), batch_size)]
-    with ThreadPoolExecutor(max_workers=max(1, REVIEW_WORKERS)) as pool:
-        results = list(pool.map(lambda b: classify(b, index), batches))
+    results = run_parallel(lambda b: classify(b, index), batches, "归类")
     groups: dict[str, list[dict]] = {}
     for batch, assign in zip(batches, results):
-        for i, to in assign.items():
+        for i, to in (assign or {}).items():
             if to != "discard" and not to.startswith("new:") and to not in current:
                 continue  # 编出来的技能名：不归档，下次再分
             groups.setdefault(to, []).append(batch[i - 1])
-    report = {"changed": {}, "created": {}, "failed": [],
+    # 各批独立起名，同一主题可能叫 new:queen-safety / new:protect-queen：统一合并一次
+    renamed = merge_new_names(groups, current, index)
+    report = {"changed": {}, "created": {}, "failed": [], "renamed": renamed,
               "assigned": {k: len(v) for k, v in sorted(groups.items())}}
     print("[CURATE] 归类：" + "，".join(f"{k}×{n}" for k, n in report["assigned"].items()))
 
@@ -204,8 +306,7 @@ def curate(root: str | None = None, batch_size: int = 30, min_new: int = 3, limi
         except Exception as e:  # 单个技能失败不影响其他技能
             return job, None, e
 
-    with ThreadPoolExecutor(max_workers=max(1, REVIEW_WORKERS)) as pool:
-        outputs = list(pool.map(run, jobs))
+    outputs = run_parallel(run, jobs, "改写 / 新建技能")
 
     done: dict[int, str] = {}  # id(教训) → 去向
     for (kind, name, items), text, err in outputs:

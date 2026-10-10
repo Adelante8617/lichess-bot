@@ -95,6 +95,56 @@ class CurateTest(unittest.TestCase):
         self.assertEqual(curated.count("discard"), 1)
         self.assertNotIn("threats-first", curated)
 
+    def fake_with_merge(self, assigns: list[str], merge: str):
+        """归类按批次依次返回 assigns；合并新名字的提示返回 merge。"""
+        queue = list(assigns)
+
+        def complete(**kw):
+            prompt = kw["messages"][0]["content"]
+            self.prompts.append(prompt)
+            if "逐条决定去向" in prompt:
+                return reply(queue.pop(0))
+            if "各批分别提议的新主题名字" in prompt:
+                return reply(merge)
+            if "新建一个技能文件" in prompt:
+                return reply(NEW)
+            return reply(REWRITTEN)
+        curate.complete = complete
+
+    def test_synonym_new_names_are_merged_across_batches(self):
+        # 两批各自起名，每组都不到 3 条；合并后 3 条，够起草新技能
+        self.fake_with_merge(['{"assign": [{"i": 1, "to": "new:rook-endgame"}, {"i": 2, "to": "new:rook-endgame"}]}',
+                              '{"assign": [{"i": 1, "to": "new:rook-activity"}, {"i": 2, "to": "discard"}]}',
+                              '{"assign": []}'],
+                             '{"merge": {"new:rook-activity": "new:rook-endgame"}}')
+        report = curate.curate(root=self.root, store=self.store, batch_size=2)
+        self.assertEqual(report["renamed"], {"new:rook-activity": "new:rook-endgame"})
+        self.assertEqual(report["assigned"]["new:rook-endgame"], 3)
+        self.assertEqual(set(report["created"]), {"rook-endgame"})
+        merge_prompt = next(p for p in self.prompts if "各批分别提议的新主题名字" in p)
+        self.assertIn("threats-first", merge_prompt)  # 现有技能也列出来，可以并进去
+
+    def test_new_name_can_merge_into_existing_skill(self):
+        self.fake_with_merge(['{"assign": [{"i": 1, "to": "new:hanging-pieces"}, {"i": 2, "to": "new:rook-endgame"}]}',
+                              '{"assign": []}', '{"assign": []}'],
+                             '{"merge": {"new:hanging-pieces": "threats-first", "new:rook-endgame": "made-up"}}')
+        report = curate.curate(root=self.root, store=self.store, batch_size=2)
+        self.assertEqual(report["renamed"], {"new:hanging-pieces": "threats-first"})  # 编出来的目标被忽略
+        self.assertEqual(set(report["changed"]), {"threats-first"})
+
+    def test_single_new_name_skips_merge_call(self):
+        self.fake(self.ASSIGN)
+        curate.curate(root=self.root, store=self.store)
+        self.assertFalse(any("各批分别提议的新主题名字" in p for p in self.prompts))
+
+    def test_run_parallel_keeps_order_and_survives_failures(self):
+        def fn(x):
+            if x == 3:
+                raise RuntimeError("boom")
+            return x * 10
+        self.assertEqual(curate.run_parallel(fn, [1, 2, 3, 4], "测试"), [10, 20, None, 40])
+        self.assertEqual(curate.run_parallel(fn, [], "测试"), [])
+
     def test_too_few_lessons_for_new_skill_wait(self):
         self.fake('{"assign": [{"i": 2, "to": "new:rook-endgame"}, {"i": 9, "to": "x"}]}')
         report = curate.curate(root=self.root, store=self.store)
