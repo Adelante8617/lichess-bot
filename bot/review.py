@@ -1,11 +1,13 @@
 """赛后复盘：自我反思、Stockfish blunder 深挖、聊天总结、局面快照验证，结果写入经验库。"""
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import chess
 
 from .boardtext import parse_model_move, san_history, uci_to_san
-from .config import MODEL, SNAPSHOT_DEDUPE_SIM, SNAPSHOT_OK_DELTA
+from .book import commit_opening_book
+from .config import MODEL, REVIEW_WORKERS, SNAPSHOT_DEDUPE_SIM, SNAPSHOT_OK_DELTA
 from .engine import stockfish_collect_blunders, stockfish_eval_move
 from .llm import complete, extract_json
 from .memory import experience_rag
@@ -95,26 +97,14 @@ PGN:
     print(f"[REVIEW] experience size = {len(experience_rag)}")
 
 
-def blunder_deep_review(pgn_text: str, result: str, my_color: str):
-    """强制：用 Stockfish 找出本局所有 blunder（双方），
-    对每个 blunder 让模型分析两个 FEN 的差异并给出新判断，
-    再用 Stockfish 评估这个新判断，全部写入经验库。"""
-    print("[BLUNDER-REVIEW] start ...")
-    blunders = stockfish_collect_blunders(pgn_text, threshold_cp=200)
-    if not blunders:
-        print("[BLUNDER-REVIEW] no blunder found")
-        return
-    print(f"[BLUNDER-REVIEW] {len(blunders)} blunder(s) found")
+def _analyze_blunder(i: int, n: int, b: dict) -> dict | None:
+    """单个 blunder：让模型分析失误并给出替代着法，再用 Stockfish 评估替代着法。
+    各 blunder 互不依赖，blunder_deep_review 并行调用；这里不写库，由调用方按顺序写入。"""
+    tag = f"[BLUNDER {i}/{n}]"
+    print(f"\n{tag} ply={b['ply']} {b['side']} 走了 {b['san']} (best={b['best_san']}) "
+          f"cp {b['cp_before']} -> {b['cp_after']} (Δ={b['delta']})")
 
-    meta_base = {"result": result, "my_color": my_color,
-                 "kind": "blunder", "time": datetime.now().isoformat()}
-
-    for i, b in enumerate(blunders, 1):
-        print(f"\n[BLUNDER {i}/{len(blunders)}] ply={b['ply']} {b['side']} "
-              f"走了 {b['san']} (best={b['best_san']}) "
-              f"cp {b['cp_before']} -> {b['cp_after']} (Δ={b['delta']})")
-
-        prompt = f"""下面是本局中一个被 Stockfish 标记为 blunder 的关键节点。
+    prompt = f"""下面是本局中一个被 Stockfish 标记为 blunder 的关键节点。
 
 阵营: {b['side']} 走子
 回合(ply): {b['ply']}
@@ -143,46 +133,67 @@ def blunder_deep_review(pgn_text: str, result: str, my_color: str):
   "your_reason": "≤80 字",
   "lesson": "≤100 字"
 }}"""
-        try:
-            resp = complete(
-                model=MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-            )
-            txt = (resp.choices[0].message.content or "").strip()
-        except Exception as e:
-            print(f"[BLUNDER-REVIEW] LLM failed: {e}")
+    try:
+        resp = complete(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        txt = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"{tag} LLM failed: {e}")
+        return None
+
+    obj = extract_json(txt)
+    if obj is None:
+        print(f"{tag} no JSON. raw={txt[:200]}")
+        return None
+
+    my_better = (obj.get("your_better_move") or "").strip()
+    print(f"{tag} diff: {obj.get('diff', '')}")
+    print(f"{tag} why : {obj.get('why_blunder', '')}")
+    print(f"{tag} mine: {my_better}  reason: {obj.get('your_reason', '')}")
+
+    # 用 Stockfish 评估模型给出的"更好走法"
+    alt_mv = parse_model_move(chess.Board(b["fen_before"]), my_better) if my_better else None
+    sf_eval = stockfish_eval_move(b["fen_before"], alt_mv.uci()) if alt_mv else \
+        {"error": f"无法解析或非法的着法: {my_better!r}"}
+    print(f"{tag} sf_eval: {sf_eval}")
+    return {"better": my_better, "reason": obj.get("your_reason", ""),
+            "lesson": (obj.get("lesson") or "").strip(), "sf_eval": sf_eval}
+
+
+def blunder_deep_review(pgn_text: str, result: str, my_color: str) -> list[dict]:
+    """强制：用 Stockfish 找出本局所有 blunder（双方），
+    对每个 blunder 让模型分析两个 FEN 的差异并给出新判断，
+    再用 Stockfish 评估这个新判断，全部写入经验库。
+    各 blunder 的分析并行（REVIEW_WORKERS 个线程），写库按 blunder 顺序。返回找到的 blunder。"""
+    print("[BLUNDER-REVIEW] start ...")
+    blunders = stockfish_collect_blunders(pgn_text, threshold_cp=200)
+    if not blunders:
+        print("[BLUNDER-REVIEW] no blunder found")
+        return []
+    print(f"[BLUNDER-REVIEW] {len(blunders)} blunder(s) found")
+
+    meta_base = {"result": result, "my_color": my_color,
+                 "kind": "blunder", "time": datetime.now().isoformat()}
+
+    n = len(blunders)
+    with ThreadPoolExecutor(max_workers=max(1, REVIEW_WORKERS)) as pool:
+        analyses = list(pool.map(lambda ib: _analyze_blunder(ib[0], n, ib[1]), enumerate(blunders, 1)))
+
+    for i, (b, a) in enumerate(zip(blunders, analyses), 1):
+        if a is None:
             continue
-
-        obj = extract_json(txt)
-        if obj is None:
-            print(f"[BLUNDER-REVIEW] no JSON. raw={txt[:200]}")
-            continue
-
-        diff = obj.get("diff", "")
-        why = obj.get("why_blunder", "")
-        my_better = (obj.get("your_better_move") or "").strip()
-        my_reason = obj.get("your_reason", "")
-        lesson = obj.get("lesson", "").strip()
-
-        print(f"[BLUNDER {i}] diff: {diff}")
-        print(f"[BLUNDER {i}] why : {why}")
-        print(f"[BLUNDER {i}] mine: {my_better}  reason: {my_reason}")
-
-        # 用 Stockfish 评估模型给出的"更好走法"
-        alt_mv = parse_model_move(chess.Board(b["fen_before"]), my_better) if my_better else None
-        sf_eval = stockfish_eval_move(b["fen_before"], alt_mv.uci()) if alt_mv else \
-                  {"error": f"无法解析或非法的着法: {my_better!r}"}
-        print(f"[BLUNDER {i}] sf_eval: {sf_eval}")
-
+        sf_eval = a["sf_eval"]
         meta = dict(meta_base)
         meta.update({"ply": b["ply"], "side": b["side"],
                      "actual_move": b["san"], "best": b["best_san"],
                      "delta": b["delta"]})
 
         # 写入主 lesson
-        if lesson:
-            entry = (f"[Blunder-Lesson] {lesson} "
+        if a["lesson"]:
+            entry = (f"[Blunder-Lesson] {a['lesson']} "
                      f"(局面: ply{b['ply']} {b['side']}方走 {b['san']}, "
                      f"引擎推荐 {b['best_san']}, Δ={b['delta']}cp)")
             print(f"[BLUNDER {i}] +lesson: {entry[:120]}")
@@ -193,7 +204,7 @@ def blunder_deep_review(pgn_text: str, result: str, my_color: str):
             verdict = sf_eval.get("verdict", "?")
             entry2 = (
                 f"[Blunder-AltMove] 走法历史: {b['history'] or '（开局）'} | "
-                f"模型替代走法 {my_better} 理由: {my_reason} | "
+                f"模型替代走法 {a['better']} 理由: {a['reason']} | "
                 f"引擎评估: cp {sf_eval['cp_before']}->{sf_eval['cp_after']} "
                 f"(Δ={sf_eval['delta']}, {verdict}); "
                 f"引擎最佳 {uci_to_san(b['fen_before'], sf_eval['best'])}. "
@@ -205,6 +216,7 @@ def blunder_deep_review(pgn_text: str, result: str, my_color: str):
             print(f"[BLUNDER {i}] alt eval skipped: {sf_eval}")
 
     print(f"[BLUNDER-REVIEW] done. experience size = {len(experience_rag)}")
+    return blunders
 
 
 def chat_review(chat_messages: list, result: str, my_color: str, my_username: str):
@@ -289,8 +301,10 @@ def commit_verified_snapshots(snapshots: list, result: str, my_color: str):
     if not snapshots:
         return
     kept = skipped_bad = skipped_dup = 0
-    for s in snapshots:
-        ev = stockfish_eval_move(s["fen"], s["move"])
+    # 每次评估各自起一个 Stockfish 进程，可以并行；写库按原顺序
+    with ThreadPoolExecutor(max_workers=max(1, REVIEW_WORKERS)) as pool:
+        evals = list(pool.map(lambda s: stockfish_eval_move(s["fen"], s["move"]), snapshots))
+    for s, ev in zip(snapshots, evals):
         if "error" in ev or ev.get("delta", 10**9) >= SNAPSHOT_OK_DELTA:
             skipped_bad += 1
             continue
@@ -308,3 +322,22 @@ def commit_verified_snapshots(snapshots: list, result: str, my_color: str):
         else:
             skipped_dup += 1
     print(f"[SNAP] {len(snapshots)} 条快照: 写入 {kept}, 未通过验证 {skipped_bad}, 重复 {skipped_dup}")
+
+
+def run_post_game(pgn_text: str, result: str, my_color: str, move_log: list, snapshots: list,
+                  uci_list: list[str], my_white: bool, chat_messages: list | None = None,
+                  my_username: str = ""):
+    """赛后各项复盘互不依赖（各自调 LLM、各自起 Stockfish，写库有锁），并行跑；某一项失败不影响其他项。"""
+    tasks = {
+        "REVIEW": lambda: post_game_review(pgn_text, result, my_color, move_log),
+        "BLUNDER-REVIEW": lambda: blunder_deep_review(pgn_text, result, my_color),
+        "SNAP": lambda: commit_verified_snapshots(snapshots, result, my_color),
+        "BOOK": lambda: commit_opening_book(uci_list, my_white),
+    }
+    if chat_messages:
+        tasks["CHAT-REVIEW"] = lambda: chat_review(chat_messages, result, my_color, my_username)
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = {tag: pool.submit(fn) for tag, fn in tasks.items()}
+    for tag, fut in futures.items():
+        if fut.exception() is not None:
+            print(f"[{tag}] failed: {fut.exception()!r}")

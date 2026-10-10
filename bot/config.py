@@ -124,6 +124,8 @@ SELF_CHECK_EFFORT = os.getenv("SELF_CHECK_EFFORT", "low").strip().lower()
 
 SNAPSHOT_OK_DELTA = 50        # 走子后己方评估损失 < 该值（cp）才算"好棋"，才允许入库
 SNAPSHOT_DEDUPE_SIM = 0.95    # 与已有条目余弦相似度 ≥ 该值则视为重复，跳过
+# 赛后复盘的并行线程数：逐个 blunder 的分析、快照的 Stockfish 验证各自用这么多线程（每个线程一个 Stockfish 进程）
+REVIEW_WORKERS = int(os.getenv("REVIEW_WORKERS", "4"))
 
 # ---- 背谱：记住自己走过、且局面没有变差的开局，之后遇到同样局面按概率直接照走 ----
 BOOK_ENABLED = os.getenv("BOOK_ENABLED", "1") == "1"

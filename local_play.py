@@ -150,16 +150,7 @@ def main():
     print(f"PGN saved to {path}")
 
     if not args.no_review:
-        bot.post_game_review(pgn_text, result, my_color, move_log)
-        try:
-            bot.blunder_deep_review(pgn_text, result, my_color)
-        except Exception as e:
-            print(f"[BLUNDER-REVIEW] failed: {e}")
-        bot.commit_verified_snapshots(snapshots, result, my_color)
-        try:
-            bot.commit_opening_book(uci_list, my_white)
-        except Exception as e:
-            print(f"[BOOK] commit failed: {e}")
+        bot.run_post_game(pgn_text, result, my_color, move_log, snapshots, uci_list, my_white)
     live.set_status("finished", result)
 
 

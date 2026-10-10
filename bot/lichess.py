@@ -12,9 +12,7 @@ from .boardtext import build_pgn, san_history
 from .config import LICHESS_TOKEN, WAIT_TIMEOUT_SEC
 from .live import live
 from .player import safe_llm_move
-from .book import commit_opening_book
-from .review import (blunder_deep_review, chat_review, commit_verified_snapshots,
-                     post_game_review, record_snapshot)
+from .review import record_snapshot, run_post_game
 
 
 def run_lichess():
@@ -196,23 +194,8 @@ def run_lichess():
                     print(f"PGN saved to {pgn_path}")
 
                     my_color = "白" if is_white else "黑"
-                    post_game_review(pgn_text, result, my_color, move_log)
-                    try:
-                        blunder_deep_review(pgn_text, result, my_color)
-                    except Exception as e:
-                        print(f"[BLUNDER-REVIEW] failed: {e}")
-                    try:
-                        chat_review(chat_messages, result, my_color, my_username)
-                    except Exception as e:
-                        print(f"[CHAT-REVIEW] failed: {e}")
-                    try:
-                        commit_verified_snapshots(snapshots, result, my_color)
-                    except Exception as e:
-                        print(f"[SNAP] commit failed: {e}")
-                    try:
-                        commit_opening_book(uci_list, is_white)
-                    except Exception as e:
-                        print(f"[BOOK] commit failed: {e}")
+                    run_post_game(pgn_text, result, my_color, move_log, snapshots, uci_list, is_white,
+                                  chat_messages=chat_messages, my_username=my_username)
                     live.set_status("finished", result)
                     break
 

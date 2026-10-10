@@ -11,18 +11,21 @@ from .rag import RAGStore
 
 _emb_client = None
 _local_embedder = None
+_init_lock = threading.Lock()  # 复盘并行时多个线程可能同时第一次调用 embed
 
 
 def embed(text: str):
     global _emb_client, _local_embedder
     if EMBED_BACKEND == "local":
-        if _local_embedder is None:
-            from sentence_transformers import SentenceTransformer
-            print(f"[EMBED] loading local model {EMBED_LOCAL_MODEL} (device={EMBED_DEVICE or 'auto'}) ...")
-            _local_embedder = SentenceTransformer(EMBED_LOCAL_MODEL, device=EMBED_DEVICE)
+        with _init_lock:
+            if _local_embedder is None:
+                from sentence_transformers import SentenceTransformer
+                print(f"[EMBED] loading local model {EMBED_LOCAL_MODEL} (device={EMBED_DEVICE or 'auto'}) ...")
+                _local_embedder = SentenceTransformer(EMBED_LOCAL_MODEL, device=EMBED_DEVICE)
         return _local_embedder.encode(text, normalize_embeddings=True).tolist()
-    if _emb_client is None:
-        _emb_client = OpenAI(api_key=EMBED_API_KEY, base_url=EMBED_BASE_URL)
+    with _init_lock:
+        if _emb_client is None:
+            _emb_client = OpenAI(api_key=EMBED_API_KEY, base_url=EMBED_BASE_URL)
     resp = _emb_client.embeddings.create(model=EMBED_MODEL, input=text)
     return resp.data[0].embedding
 

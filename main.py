@@ -15,14 +15,15 @@ from bot.memory import (embed, experience_rag, opening_rag, seed_openings_if_emp
                         warm_up)
 from bot.player import get_llm_move, safe_llm_move  # noqa: E402
 from bot.review import (blunder_deep_review, chat_review, commit_verified_snapshots,  # noqa: E402
-                        post_game_review, record_snapshot)
+                        post_game_review, record_snapshot, run_post_game)
 
 seed_openings_if_empty()
 warm_up()
 print(f"[RAG] openings={len(opening_rag)}  experience={len(experience_rag)}")
 
 __all__ = ["build_pgn", "STOCKFISH_PATH", "embed", "get_llm_move", "safe_llm_move", "blunder_deep_review",
-           "chat_review", "commit_opening_book", "commit_verified_snapshots", "post_game_review", "record_snapshot"]
+           "chat_review", "commit_opening_book", "commit_verified_snapshots", "post_game_review", "record_snapshot",
+           "run_post_game"]
 
 if __name__ == "__main__":
     from bot.lichess import run_lichess
