@@ -46,7 +46,7 @@ when:
 | `my_king` / `opp_king` | `uncastled` / `kingside` / `queenside` / `other` | 王的位置：还在初始格 / g、h 线己方前两排 / a-c 线己方前两排 / 其他 |
 | `in_check` | `true` / `false` | 我方正被将军 |
 | `opp_captured` | `true` / `false` | 对方上一步吃了子 |
-| `threatened` | `true` / `false` | 我方有马象车后被更低价值的子攻击，或被攻击且没有保护 |
+| `threatened` | `true` / `false` | 对方现在就能用吃子交换净赚我方的马象车后：被更低价值的子攻击（有保护也算）、没有保护、或攻击多于保护 |
 | `threatened_min` | 整数 | 上面这样受威胁的马象车后至少有几个（`2` = 被双攻 / 叉子） |
 | `opp_passer_min` / `my_passer_min` | 整数 1-8 | 对方 / 我方最靠前的通路兵已到第几横排（按该方视角） |
 | `my_color` | `white` / `black` | 我方执哪一方 |

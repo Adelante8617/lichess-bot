@@ -15,8 +15,9 @@ import threading
 
 import chess
 
-from .boardtext import PIECE_VALUES, game_phase, material_lead
+from .boardtext import game_phase, material_lead
 from .config import SKILL_AUTO_MAX, SKILL_STATS_PATH, SKILLS_DIR
+from .guard import en_prise
 
 LETTERS = {"P": chess.PAWN, "N": chess.KNIGHT, "B": chess.BISHOP, "R": chess.ROOK, "Q": chess.QUEEN}
 
@@ -50,23 +51,13 @@ def last_move_captured(board: chess.Board) -> bool:
 
 
 def threatened_count(board: chess.Board) -> int:
-    """轮到走的一方有几个马、象、车、后正被攻击，且攻击者价值更低、或这个子没有保护。
-    ≥2 就是双攻（叉子、抽将后的闪击等）：一步只能救一个。"""
-    me = board.turn
-    count = 0
-    for pt in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN):
-        for sq in board.pieces(pt, me):
-            attackers = board.attackers(not me, sq)
-            if not attackers:
-                continue
-            cheapest = min(PIECE_VALUES.get(board.piece_type_at(a), 100) for a in attackers)
-            if cheapest < PIECE_VALUES[pt] or not board.attackers(me, sq):
-                count += 1
-    return count
+    """轮到走的一方有几个马、象、车、后被对方的吃子交换净赚（被更低价值的子攻击、没有保护、
+    或攻击多于保护）。≥2 就是双攻（叉子、抽将后的闪击等）：一步只能救一个。"""
+    return len(en_prise(board))
 
 
 def threatened(board: chess.Board) -> bool:
-    """轮到走的一方有没有马、象、车、后正被攻击，且攻击者价值更低、或这个子没有保护。"""
+    """轮到走的一方有没有马、象、车、后被对方的吃子交换净赚。"""
     return threatened_count(board) > 0
 
 
@@ -135,7 +126,7 @@ PREDICATE_DOCS = {
     "my_king / opp_king": '"uncastled"（还在初始格）/ "kingside" / "queenside" / "other"',
     "in_check": "true / false：我方正被将军",
     "opp_captured": "true / false：对方上一步吃了子",
-    "threatened": "true / false：我方有马象车后被更低价值的子攻击、或被攻击且没有保护",
+    "threatened": "true / false：对方现在就能用吃子交换净赚我方的马象车后（被更低价值的子攻击、没有保护、或攻击多于保护）",
     "threatened_min": "整数：上面这样受威胁的马象车后至少有几个（2 表示被双攻 / 叉子）",
     "opp_passer_min / my_passer_min": "对方 / 我方最靠前的通路兵已到第几横排（整数 1-8，按该方视角）",
     "my_color": '"white" / "black"',

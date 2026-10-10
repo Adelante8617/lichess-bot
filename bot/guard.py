@@ -12,7 +12,7 @@ import re
 
 import chess
 
-from .boardtext import COLOR_ZH, PIECE_VALUES, display_san, material_points, parse_model_move
+from .boardtext import COLOR_ZH, PIECE_VALUES, PIECE_ZH, display_san, material_points, parse_model_move
 
 _ORDER_VALUE = {**PIECE_VALUES, chess.KING: 100}  # 只用于"先用哪个子吃"的排序：王最后上
 MAX_LINE_PLIES = 16
@@ -54,9 +54,26 @@ def _best_capture(board: chess.Board) -> tuple[int, list[str], int | None]:
     return best, best_line, best_sq
 
 
+def _passed(board: chess.Board) -> chess.Board:
+    """假设轮到走的一方空一步，换对方走的局面（只用于"对方现在就能吃什么"的模拟）。"""
+    after = board.copy(stack=False)
+    after.push(chess.Move.null())
+    return after
+
+
+def en_prise(board: chess.Board) -> list[int]:
+    """轮到走的一方的马、象、车、后里，对方现在就能在它的格上发起吃子交换净赚的那些格：
+    被更低价值的子攻击（有保护也一样，对方吃一个、我吃回仍净亏）、没有保护、或攻击多于保护。"""
+    me = board.turn
+    opp = _passed(board)
+    return [sq for pt in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN)
+            for sq in board.pieces(pt, me) if _exchange(opp, sq)[0] > 0]
+
+
 def material_risk(board: chess.Board, move: chess.Move) -> dict:
     """走 move 之后，对方用一次吃子交换能让我方净亏多少（已扣除 move 本身吃到的子）。
-    返回 {"loss": 净亏分数（≤0 表示不亏）, "line": 对方的最优交换序列, "square": 交换发生的格}。"""
+    返回 {"loss": 净亏分数（≤0 表示不亏）, "line": 对方的最优交换序列, "square": 交换发生的格,
+    "preexisting": 这个吃子在走 move 之前就已存在（同一个子、同样能净赚），move 没有解决它}。"""
     gained = _value(board.piece_at(move.to_square))
     if board.is_en_passant(move):
         gained = 1
@@ -65,17 +82,37 @@ def material_risk(board: chess.Board, move: chess.Move) -> dict:
     after = board.copy(stack=False)
     after.push(move)
     best, best_line, best_sq = _best_capture(after)
+    preexisting = (best_sq is not None and best > 0 and best_sq not in (move.from_square, move.to_square)
+                   and _exchange(_passed(board), best_sq)[0] >= best)
     return {"loss": best - gained, "line": best_line,
-            "square": chess.square_name(best_sq) if best_sq is not None else ""}
+            "square": chess.square_name(best_sq) if best_sq is not None else "", "preexisting": preexisting}
+
+
+def _line_steps(board: chess.Board, move: chess.Move, line: list[str]) -> str:
+    """把交换序列逐步写成"谁吃了谁"：Bxa1（对方象吃我方车）→ Rxa1（我方车吃回象）。"""
+    me = board.turn
+    b = board.copy(stack=False)
+    b.push(move)
+    steps = []
+    for san in line:
+        mv = parse_model_move(b, san)
+        if mv is None:
+            break
+        mover, taken = b.piece_at(mv.from_square), b.piece_at(mv.to_square)
+        who, whom = ("我方", "对方") if b.turn == me else ("对方", "我方")
+        steps.append(f"{san}（{who}{PIECE_ZH[mover.piece_type]}吃{whom}{PIECE_ZH[taken.piece_type] if taken else '兵'}）")
+        b.push(mv)
+    return " → ".join(steps)
 
 
 def risk_text(board: chess.Board, move: chess.Move, risk: dict) -> str:
     """把模拟结果写成给模型看的事实描述。"""
     san = display_san(board, move)
-    line = " ".join(risk["line"])
+    steps = _line_steps(board, move, risk["line"]) or " ".join(risk["line"])
+    pre = (f"这个吃子在走 {san} 之前就已存在，{san} 没有解决它。" if risk.get("preexisting") else "")
     return (f"走 {san} 之后，对方可以在 {risk['square']} 上吃子：按双方都用价值最低的子在该格轮流吃、"
-            f"吃亏的一方停手来模拟，交换序列为 {line}，单看这一格的交换，我方净亏 {risk['loss']} 分"
-            f"（兵1 马象3 车5 后9，已算上 {san} 本身吃到的子）。")
+            f"吃亏的一方停手来模拟，交换序列为 {steps}，单看这一格的交换，我方净亏 {risk['loss']} 分"
+            f"（兵1 马象3 车5 后9，已算上 {san} 本身吃到的子）。{pre}")
 
 
 def mate_in_one(board: chess.Board) -> bool:

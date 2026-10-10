@@ -110,6 +110,8 @@ class SelfCheckTest(unittest.TestCase):
 
 # 日志 20261008_110636 的 ply 21：白方走 Bg5，被 h6 黑兵直接吃掉
 PLY21 = "r1bq1rk1/1p3pp1/p1nbpn1p/3p4/3P4/2NBBN2/PPP2PPP/R2QR1K1 w - - 0 11"
+# 日志 20261010_173535 的 ply 65：h8 象攻 a1 车（Re1 保护），Be4 + Rf7 攻 f3 马（Bg4 保护）
+PLY65 = "r6b/1p3r1k/3p2pp/P1nP4/2P1b1B1/4PNPP/8/R3R1K1 w - - 5 33"
 
 
 class MaterialRiskTest(unittest.TestCase):
@@ -128,6 +130,12 @@ class MaterialRiskTest(unittest.TestCase):
 
     def test_capture_of_defended_pawn(self):
         self.assertEqual(self.risk(PLY21, "Bxh6")["loss"], 2)
+
+    def test_preexisting_capture(self):
+        r = self.risk(PLY65, "Nh4")
+        self.assertEqual((r["loss"], r["square"], r["preexisting"]), (2, "a1", True))
+        self.assertFalse(self.risk(PLY21, "Bg5")["preexisting"])  # 走到被兵控制的格：是这步造成的
+        self.assertEqual(sorted(chess.square_name(s) for s in guard.en_prise(chess.Board(PLY65))), ["a1", "f3"])
 
     def test_favorable_capture_not_flagged(self):
         # 兵吃马、马再吃回：净赚 2，不算丢子
@@ -178,6 +186,21 @@ class HangGuardTest(unittest.TestCase):
                                         list(player.legal_san_map(board)), [])
         self.assertEqual(board.san(mv), "Bxh7+")
         self.assertEqual(records[0]["outcome"], "kept_positional")
+
+    def test_positional_keep_rejected_for_preexisting_capture(self):
+        # 日志 20261010_173535 第 33 步：h8 象早已攻 a1 车（Re1 保护），Nh4 不管，Bxa1 Rxa1 亏 2。
+        # 这是漏看不是弃子，局面性理由不放行，回退到候选里不丢子的 Nd4
+        board = chess.Board(PLY65)
+        llm._client = FakeClient({}, [], guard_replies=[
+            {"verdict": "keep", "move": "Nh4", "kind": "positional", "line": "", "reason": "只丢一兵"}] * 3)
+        mv, records = hooks.hang_guard(board, [], board.parse_san("Nh4"),
+                                        list(player.legal_san_map(board)), ["Nh4", "Nd4"])
+        self.assertEqual(board.san(mv), "Nd4")
+        self.assertNotIn("kept_positional", [r.get("outcome") for r in records])
+        prompt = llm._client.prompts[0]
+        self.assertIn("对方象吃我方车", prompt)
+        self.assertIn("之前就已存在", prompt)
+        self.assertNotIn("局面性弃子", prompt)
 
     def test_guard_prompt_is_neutral(self):
         _, _, client = self.run_guard([change("Re2")])

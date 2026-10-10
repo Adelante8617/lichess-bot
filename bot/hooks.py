@@ -86,7 +86,8 @@ def hang_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans:
     """丢子守卫：程序模拟对方吃子交换，单格交换会净亏 ≥ HANG_GUARD_MIN 分时把模拟结果交给模型复查。
     - 模型坚持并给出变化（tactical）：程序按规则摆一遍，合法且终点拿回子力 / 将杀就照走；
       摆不通就把摆出的事实交回模型，进入下一轮。
-    - 模型坚持并说明局面性补偿（positional）：净亏 ≤ HANG_GUARD_POSITIONAL 时照走，不要求变化。
+    - 模型坚持并说明局面性补偿（positional）：净亏 ≤ HANG_GUARD_POSITIONAL 时照走，不要求变化；
+      但这个吃子在走之前就已存在（走法没解决它）时不适用。
     - 模型改选：新着法同样要过守卫。
     轮数用完仍未解决时走 _guard_fallback：候选里不丢子的 → 全部合法着法里不丢子的 → 净亏最小的。
     每条记录带 outcome（kept_tactical / kept_positional / changed / fallback / fallback_pick /
@@ -101,7 +102,8 @@ def hang_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans:
             return current, records
         san = display_san(board, current)
         fact = risk_text(board, current, risk)
-        positional_ok = risk["loss"] <= HANG_GUARD_POSITIONAL
+        # 局面性弃子是主动送子换补偿；对方早已摆好的吃子被无视是漏看，不凭理由放行，要具体变化
+        positional_ok = risk["loss"] <= HANG_GUARD_POSITIONAL and not risk.get("preexisting")
         print(f"[GUARD round={rnd}] {fact}")
         live.stage(f"丢子守卫：复查 {san}")
         rejected_view = {display_san(board, m): r for m, r in rejected.items()}
