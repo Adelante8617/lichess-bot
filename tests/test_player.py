@@ -22,7 +22,7 @@ os.environ.update({"AUTO_RECALL_K": "0", "SELF_CHECK_ROUNDS": "2", "OPENING_FAST
 
 import chess  # noqa: E402
 
-from bot import guard, llm, player  # noqa: E402
+from bot import guard, hooks, llm, player  # noqa: E402
 
 
 def _delta(content=None, reasoning=None, tool_calls=None):
@@ -89,7 +89,7 @@ class SelfCheckTest(unittest.TestCase):
 
     def run_check(self, first: str, replies: list[dict]):
         llm._client = FakeClient({}, replies)
-        mv, records = player.self_check(self.board, [], self.board.parse_san(first), self.legal, "medium")
+        mv, records = hooks.self_check(self.board, [], self.board.parse_san(first), self.legal, "medium")
         return self.board.san(mv), records, llm._client
 
     def test_keep(self):
@@ -152,7 +152,7 @@ class HangGuardTest(unittest.TestCase):
 
     def run_guard(self, replies, candidates=("Bg5", "Re2")):
         llm._client = FakeClient({}, [], guard_replies=replies)
-        mv, records = player.hang_guard(self.board, [], self.board.parse_san("Bg5"), self.legal,
+        mv, records = hooks.hang_guard(self.board, [], self.board.parse_san("Bg5"), self.legal,
                                         list(candidates))
         return self.board.san(mv), records, llm._client
 
@@ -175,7 +175,7 @@ class HangGuardTest(unittest.TestCase):
         line = "Bxh7+ Kxh7 Ng5+ Kg8 Qh5 Re8 Qxf7+ Kh8 Qh5+ Kg8 Qh7+ Kf8 Qh8+ Ke7 Qxg7"
         llm._client = FakeClient({}, [], guard_replies=[
             {"verdict": "keep", "move": "Bxh7+", "kind": "tactical", "line": line, "reason": "杀王"}])
-        mv, records = player.hang_guard(board, [], board.parse_san("Bxh7+"),
+        mv, records = hooks.hang_guard(board, [], board.parse_san("Bxh7+"),
                                         list(player.legal_san_map(board)), [])
         self.assertEqual(board.san(mv), "Bxh7+")
         self.assertEqual(records[0]["outcome"], "kept_tactical")
@@ -184,7 +184,7 @@ class HangGuardTest(unittest.TestCase):
         board = chess.Board("rnbq1rk1/pppn1ppp/4p3/3pP3/1b1P4/2NB1N2/PPP2PPP/R1BQK2R w KQ - 0 7")
         llm._client = FakeClient({}, [], guard_replies=[
             {"verdict": "keep", "move": "Bxh7+", "kind": "positional", "line": "", "reason": "王翼被削弱"}])
-        mv, records = player.hang_guard(board, [], board.parse_san("Bxh7+"),
+        mv, records = hooks.hang_guard(board, [], board.parse_san("Bxh7+"),
                                         list(player.legal_san_map(board)), [])
         self.assertEqual(board.san(mv), "Bxh7+")
         self.assertEqual(records[0]["outcome"], "kept_positional")
@@ -206,7 +206,7 @@ class HangGuardTest(unittest.TestCase):
 
     def test_no_llm_call_for_safe_move(self):
         llm._client = FakeClient({}, [])
-        mv, records = player.hang_guard(self.board, [], self.board.parse_san("Re2"), self.legal, [])
+        mv, records = hooks.hang_guard(self.board, [], self.board.parse_san("Re2"), self.legal, [])
         self.assertEqual(records, [])
         self.assertEqual(llm._client.prompts, [])
 
@@ -222,7 +222,7 @@ class HangGuardFallbackTest(unittest.TestCase):
     def run_guard(self, fen, first, replies, candidates, picks=()):
         board = chess.Board(fen)
         llm._client = FakeClient({}, [], guard_replies=replies, pick_replies=list(picks))
-        mv, records = player.hang_guard(board, [], board.parse_san(first), list(player.legal_san_map(board)),
+        mv, records = hooks.hang_guard(board, [], board.parse_san(first), list(player.legal_san_map(board)),
                                         candidates)
         return board.san(mv), records, llm._client
 
@@ -428,6 +428,41 @@ class ArchiveTest(unittest.TestCase):
             rows = [json.loads(line) for line in f]
         self.assertEqual([r["ply"] for r in rows], [1, 3])
         self.assertEqual(rows[0]["reasoning"], "测试思考内容")
+
+
+class HookPipelineTest(unittest.TestCase):
+    """run_pre_move 的调度：recheck 守卫在后面的 hook 改着后重跑，final hook 改着不触发重跑。"""
+
+    def setUp(self):
+        self.board = chess.Board()
+        self.ctx = hooks.MoveContext(board=self.board, messages=[], legal_sans=[], candidates=[],
+                                     complexity="", check_levels=[], levels=[], max_tokens=None)
+        self.calls: list[str] = []
+
+    def hook(self, name, to=None, **kw):
+        def run(ctx, mv):
+            self.calls.append(f"{name}:{self.board.san(mv)}")
+            new = self.board.parse_san(to) if to else mv
+            return new, [{"hook": name}] if new != mv else []
+        return hooks.Hook(name, name, lambda ctx: True, run, **kw)
+
+    def test_recheck_after_later_change(self):
+        mv, recs = hooks.run_pre_move(self.ctx, self.board.parse_san("e4"),
+                                      [self.hook("guard", recheck=True), self.hook("check", to="d4")])
+        self.assertEqual(self.board.san(mv), "d4")
+        self.assertEqual(self.calls, ["guard:e4", "check:e4", "guard:d4"])
+        self.assertEqual(list(recs), ["check"])  # 没改着的 hook 没有记录
+
+    def test_final_change_skips_recheck(self):
+        mv, _ = hooks.run_pre_move(self.ctx, self.board.parse_san("e4"),
+                                   [self.hook("guard", recheck=True), self.hook("mate", to="Nf3", final=True)])
+        self.assertEqual(self.board.san(mv), "Nf3")
+        self.assertEqual(self.calls, ["guard:e4", "mate:e4"])
+
+    def test_disabled_hook_skipped(self):
+        off = hooks.Hook("off", "off", lambda ctx: False, lambda ctx, mv: (mv, [{"x": 1}]))
+        mv, recs = hooks.run_pre_move(self.ctx, self.board.parse_san("e4"), [off])
+        self.assertEqual(recs, {})
 
 
 class GetMoveTest(unittest.TestCase):
