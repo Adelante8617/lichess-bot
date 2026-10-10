@@ -15,4 +15,7 @@ os.environ.update({"AUTO_RECALL_K": "0", "SELF_CHECK_ROUNDS": "2", "OPENING_FAST
                    "COMPLEXITY_CHECK": "1", "THINK_LADDER": "default", "MATERIAL_LEAD_SKIP": "12",
                    "BOARD_RELATIONS": "0", "ANALYSIS_BOARD": "0", "PLAN_MEMORY": "1",
                    "HANG_GUARD": "1", "HANG_GUARD_MIN": "2", "HANG_GUARD_ROUNDS": "2",
-                   "TRUNCATE_SALVAGE": "summary", "TRUNCATE_REASONING_TAIL": "4000"})
+                   "TRUNCATE_SALVAGE": "summary", "TRUNCATE_REASONING_TAIL": "4000",
+                   # 仓库里的技能内容会变，测试默认不加载；需要时显式传 root
+                   "SKILLS_DIR": os.path.join(os.getcwd(), "no-skills"), "EXPERIENCE_IN_PLAY": "0"})
+SKILLS_ROOT = os.path.join(ROOT, "skills")

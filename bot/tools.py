@@ -1,42 +1,59 @@
-"""模型可调用的工具：对局阶段只能查库 / 摆棋，复盘阶段才额外开放 Stockfish。"""
-from . import board_view
-from .config import ANALYSIS_BOARD
+"""模型可调用的工具：对局阶段只能查库 / 读技能 / 摆棋，复盘阶段才额外开放 Stockfish。"""
+from . import board_view, skills
+from .config import ANALYSIS_BOARD, EXPERIENCE_IN_PLAY
 from .engine import stockfish_analyze_pgn
 from .memory import experience_rag, opening_rag, search
 
-PLAY_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_opening_book",
-            "description": (
-                "开局阶段（约前 10-15 步）可调用，根据局面描述检索开局思路。"
-                "仅供参考，不强制采纳。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "对当前局面或想走开局的简短描述"}
-                },
-                "required": ["query"]
-            }
+OPENING_BOOK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_opening_book",
+        "description": (
+            "开局阶段（约前 10-15 步）可调用，根据局面描述检索开局思路。"
+            "仅供参考，不强制采纳。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "对当前局面或想走开局的简短描述"}
+            },
+            "required": ["query"]
         }
-    },
-    {
+    }
+}
+
+SEARCH_EXPERIENCE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_experience",
+        "description": "查询过往复盘经验，可在任意阶段调用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"}
+            },
+            "required": ["query"]
+        }
+    }
+}
+
+
+def load_skill_tool_spec() -> dict:
+    """load_skill：读取技能目录里某个技能的全文。name 限定为现有技能名。"""
+    names = list(skills.all_skills())
+    return {
         "type": "function",
         "function": {
-            "name": "search_experience",
-            "description": "查询过往复盘经验，可在任意阶段调用。",
+            "name": "load_skill",
+            "description": ("读取技能目录（见系统提示）里某个技能的全文：从过往对局总结出的、某类局面的做法与检查清单。"
+                            "已经自动附在局面描述里的技能不必再读。"),
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string"}
-                },
-                "required": ["query"]
+                "properties": {"name": {"type": "string", "enum": names, "description": "技能名"}},
+                "required": ["name"]
             }
         }
     }
-]
 
 # 分析棋盘：模型自己摆变化，程序只执行规则，不评估、不推荐
 PLAY_LINE_TOOL = {
@@ -63,7 +80,14 @@ PLAY_LINE_TOOL = {
 
 
 def play_tools() -> list:
-    return PLAY_TOOLS + [PLAY_LINE_TOOL] if ANALYSIS_BOARD else PLAY_TOOLS
+    tools = [OPENING_BOOK_TOOL]
+    if EXPERIENCE_IN_PLAY:
+        tools.append(SEARCH_EXPERIENCE_TOOL)
+    if skills.all_skills():
+        tools.append(load_skill_tool_spec())
+    if ANALYSIS_BOARD:
+        tools.append(PLAY_LINE_TOOL)
+    return tools
 
 
 # 复盘阶段额外可用工具：Stockfish 分析
@@ -111,6 +135,8 @@ def run_tool(name: str, args: dict, ctx: dict | None = None) -> str:
         return search(opening_rag, q)
     if name == "search_experience":
         return search(experience_rag, q)
+    if name == "load_skill":
+        return skills.load_skill_tool(args.get("name", ""))
     if name == "analyze_with_stockfish":
         pgn_text = ctx.get("pgn_text")
         my_color = ctx.get("my_color", "白")

@@ -5,7 +5,7 @@ import random
 
 import chess
 
-from . import board_view, book
+from . import board_view, book, skills
 from .archive import log_reasoning
 from .boardtext import (COLOR_ZH, board_meta, describe_last_move, display_san, legal_san_map,
                         material_lead, parse_model_move, piece_lists, render_board, san_history,
@@ -305,6 +305,10 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         print(f"[RECALL] {len(recalled)} 条: " + " | ".join(h["text"][:40] for h in recalled))
     else:
         recall_section = "（无）"
+    # 技能按规则匹配，不调 LLM、不做 embedding，开局快速模式也加载
+    skill_hits = skills.match_skills(board)
+    if skill_hits:
+        print(f"[SKILL] 自动加载：{', '.join(s['name'] for s in skill_hits)}")
 
     prompt = user_prompt(
         board_text=render_board(board), last_move=last_section,
@@ -317,7 +321,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         prev_line=prev_line_section(prog["line_san"], plan["goal"], prog["expected"], prog["actual"],
                                     display_san(board, prog["next"]) if followed else "", next_hang)
         if prog else "",
-        mate_threat=opp_threat)
+        mate_threat=opp_threat, skill_text=skills.section_text(skill_hits))
 
     messages = [
         {"role": "system", "content": system_prompt()},
@@ -339,6 +343,7 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
     obs: dict = {}
     warnings: list[str] = []
     recalled_view = [{"text": h["text"], "score": round(h["score"], 3)} for h in recalled]
+    used_skills = [s["name"] for s in skill_hits]  # 自动加载的 + 模型用 load_skill 读取的
 
     MAX_ATTEMPTS = 3
     step = 0  # 当前档位在 ladder 中的下标；被截断或走法非法都会往下降
@@ -366,6 +371,9 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
                     except Exception:
                         args = {}
                     result = run_tool(tc.function.name, args, {"board": board})
+                    if tc.function.name == "load_skill" and str(args.get("name", "")) in skills.all_skills() \
+                            and args["name"] not in used_skills:
+                        used_skills.append(args["name"])
                     print(f"[TOOL] {tc.function.name}({args}) -> {result[:120]}")
                     live.tool(tc.function.name, args, result)
                     messages.append({
@@ -422,6 +430,8 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
                 max_tokens=max_tokens, fast=fast)
             mv, hook_records = run_pre_move(ctx, mv)
             obs.update(hook_records)
+            if used_skills:
+                obs["skills"] = used_skills
             if display_san(board, mv) != chosen_san:
                 warnings.append(f"落子前复查后改选：{chosen_san} → {display_san(board, mv)}")
                 obs["pv"] = []  # 原主变基于旧着法，已失效

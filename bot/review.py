@@ -5,6 +5,7 @@ from datetime import datetime
 
 import chess
 
+from . import skills
 from .boardtext import parse_model_move, san_history, uci_to_san
 from .book import commit_opening_book
 from .config import MODEL, REVIEW_WORKERS, SNAPSHOT_DEDUPE_SIM, SNAPSHOT_OK_DELTA
@@ -334,7 +335,9 @@ def run_post_game(pgn_text: str, result: str, my_color: str, move_log: list, sna
     """赛后各项复盘互不依赖（各自调 LLM、各自起 Stockfish，写库有锁），并行跑；某一项失败不影响其他项。"""
     tasks = {
         "REVIEW": lambda: post_game_review(pgn_text, result, my_color, move_log),
-        "BLUNDER-REVIEW": lambda: blunder_deep_review(pgn_text, result, my_color),
+        # 技能统计要用 blunder 列表：本局哪些步命中了哪些技能、其中几步是 blunder
+        "BLUNDER-REVIEW": lambda: skills.record_game(pgn_text, my_color,
+                                                     blunder_deep_review(pgn_text, result, my_color)),
         "SNAP": lambda: commit_verified_snapshots(snapshots, result, my_color),
         "BOOK": lambda: commit_opening_book(uci_list, my_white),
     }

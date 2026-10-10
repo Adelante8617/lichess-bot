@@ -1,5 +1,6 @@
 """下棋阶段的提示词。改提示词只需要动这个文件。"""
-from .config import ANALYSIS_BOARD, BOARD_RELATIONS, TOOL_ROUNDS
+from . import skills
+from .config import ANALYSIS_BOARD, BOARD_RELATIONS, EXPERIENCE_IN_PLAY, TOOL_ROUNDS
 
 SYSTEM_PROMPT = """你是一个国际象棋 AI。每一步按下面的流程思考，最后只输出一个 JSON。
 
@@ -59,8 +60,9 @@ SYSTEM_PROMPT = """你是一个国际象棋 AI。每一步按下面的流程思�
 - 不做未经验证的弃子：只有在算清楚能拿回子力、能将杀、或获得决定性优势时才弃子；
   "争取主动""打开线路""制造威胁"这类模糊理由不算。
 - 已经落后时，更要避免连续冒险；先稳住局面，不要孤注一掷。子力领先时，兑子简化通常是好方针。
-- 经验库：user_prompt 中可能附带自动召回的经验，仅供参考；也可调用 search_experience /
-  search_opening_book 查询。与当前局面不符的经验直接忽略。
+- 技能：从你过往对局总结出的、某类局面的做法与检查清单。程序按局面特征（阶段、子力、王的位置等）
+  自动把相关技能附在 user_prompt 里；技能目录里的其他技能可调用 load_skill 读取。技能是经验总结，
+  不是规则：与当前局面不符的部分直接忽略，具体计算优先。开局可调用 search_opening_book 查开局思路。
 - 人类教练的聊天评价只在赛后复盘中提供，对局中你看不到，请独立思考。
 
 输出。字段顺序就是你的决策顺序：
@@ -93,7 +95,14 @@ SYSTEM_PROMPT = """你是一个国际象棋 AI。每一步按下面的流程思�
 
 
 def system_prompt() -> str:
-    """棋盘辅助开关打开时，在系统提示后追加说明；全关时与 SYSTEM_PROMPT 相同。"""
+    """SYSTEM_PROMPT + 技能目录（有技能时）+ 经验库说明（EXPERIENCE_IN_PLAY 时）+ 棋盘辅助说明（开关打开时）。"""
+    prompt = SYSTEM_PROMPT
+    index = skills.index_text()
+    if index:
+        prompt += "\n\n技能目录（name：说明）：\n" + index
+    if EXPERIENCE_IN_PLAY:
+        prompt += ("\n\n经验库：user_prompt 中可能附带自动召回的零散经验，仅供参考；也可调用 search_experience 查询。"
+                   "与当前局面不符的经验直接忽略。")
     extra = []
     if BOARD_RELATIONS:
         extra.append(
@@ -109,8 +118,8 @@ def system_prompt() -> str:
             f"并在变化的终点自己判断局面（子力、王的安全、双方的威胁）。"
             f"单步内工具往返最多 {TOOL_ROUNDS} 轮，simple 局面一般不必调用。")
     if not extra:
-        return SYSTEM_PROMPT
-    return SYSTEM_PROMPT + "\n\n棋盘辅助：\n" + "\n".join(extra)
+        return prompt
+    return prompt + "\n\n棋盘辅助：\n" + "\n".join(extra)
 
 
 MATE_THREAT_NOTE = ("\n==== 程序提醒 ====\n"
@@ -122,10 +131,13 @@ MATE_THREAT_NOTE = ("\n==== 程序提醒 ====\n"
 def user_prompt(*, board_text: str, last_move: str, history: str, my_color: str, my_pieces: str,
                 opp_pieces: str, meta: str, ply: int, relations: str, prev_strategy: str | None,
                 recalled: str, legal_sans: list[str], fast: bool, complexity: str,
-                complexity_reason: str, prev_line: str = "", mate_threat: bool = False) -> str:
+                complexity_reason: str, prev_line: str = "", mate_threat: bool = False,
+                skill_text: str = "") -> str:
     """每一步的局面描述。relations 为空表示不附子力关系；prev_strategy 为 None 表示不带上一步方针；
     prev_line 为 prev_line_section() 的结果，空表示没有可用的上一步主变；
-    mate_threat：程序查到对方有一步杀威胁，只提醒存在，不给着法。"""
+    mate_threat：程序查到对方有一步杀威胁，只提醒存在，不给着法；
+    skill_text：按局面自动加载的技能正文（skills.section_text），空表示没有命中；
+    recalled：经验库自动召回，只在 EXPERIENCE_IN_PLAY 时出现。"""
     aid = MATE_THREAT_NOTE if mate_threat else ""
     if relations:
         aid += f"\n==== 子力关系（程序按规则列出的原始事实，不含任何判断）====\n{relations}\n"
@@ -142,6 +154,12 @@ def user_prompt(*, board_text: str, last_move: str, history: str, my_color: str,
                   f"complexity 字段照填 {complexity}；")
     else:
         effort = "- 先判断局面复杂度，按复杂度决定思考投入；"
+    knowledge = ""
+    if skill_text:
+        knowledge += ("\n==== 按局面自动加载的技能（过往对局的总结，与当前局面不符的部分忽略）====\n"
+                      f"{skill_text}\n")
+    if EXPERIENCE_IN_PLAY:
+        knowledge += f"\n==== 经验库自动召回（仅供参考，与当前局面不符就忽略）====\n{recalled}\n"
     return f"""【当前局面，轮到你走】
 盘面(白=W*, 黑=B*, '.'=空，第二个字母为子种 K/Q/R/B/N/P):
 {board_text}
@@ -161,10 +179,7 @@ def user_prompt(*, board_text: str, last_move: str, history: str, my_color: str,
 ==== 局面信息 ====
 {meta}
 回合(ply): {ply}  全回合数(fullmove): {(ply + 1) // 2}
-{aid}
-==== 经验库自动召回（仅供参考，与当前局面不符就忽略）====
-{recalled}
-
+{aid}{knowledge}
 合法走法（SAN，已替你过滤，只含你能走的着；带 + 表示该着会将军。程序不区分将军和将杀，
 将杀也只标 +，带 + 的着法有可能直接将死对方，需要你自己判断）:
 {", ".join(legal_sans)}

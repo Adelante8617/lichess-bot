@@ -2,7 +2,8 @@
 
 一个挂在 [Lichess](https://lichess.org) BOT 账号下、**完全由大语言模型决策**的国际象棋智能体。
 对局中不调用任何象棋引擎（Stockfish 只在赛后复盘时出现），让 LLM 自己阅读局面、计算主要变化、执行下棋动作；
-赛后用 Stockfish 找出 blunder，引导模型自我反思，把经验写进 RAG 记忆库，后续对局中自动召回。
+赛后用 Stockfish 找出 blunder，引导模型自我反思，把教训写进经验库，再定期整理成按局面类型组织的**技能（skill）**，
+后续对局中按局面规则自动加载。
 支持从 Lichess 聊天框读取人类教练的实时评价（仅赛后总结，不用于实时作弊）。
 
 ![框架图](./framework.png)
@@ -20,14 +21,17 @@
 - **落子前自检轮**：选出着法后，再单独让模型看一眼走完后的盘面，找出对方最强应着；会白丢子就改选（最多 2 轮，`SELF_CHECK_ROUNDS`）。前几轮否决过的着法连同理由会带进后续轮次，不允许改回（避免 A → B → A 的来回摇摆）；最后一轮改出的着法会标注"未经复查"。只让模型自己复查，程序不做任何局面判断。
 - **丢子守卫**（`HANG_GUARD=1`，默认开）：落子前程序按规则模拟对方的吃子交换（静态交换 SEE：双方轮流用价值最低的子吃、吃亏一方停手，用合法着法生成，自动处理牵制）。会净亏 ≥ `HANG_GUARD_MIN`（默认 2）分时，把交换序列作为事实交给模型复查；模型能写出拿回子力的具体变化才允许坚持，否则改选，新着法同样过守卫（最多 `HANG_GUARD_ROUNDS` 轮）。仍会丢子时，改用模型自己候选里不丢子的着法。安全的着法不额外调用 LLM。只覆盖"走完就被直接吃掉"这一类，捉双 / 牵制仍由模型判断。
 - **将杀守卫**（`MATE_GUARD=1`，默认开）：落子前程序按规则检查走完这步后对方有没有一步杀。有就只告诉模型"存在一步杀"（**不给对方的具体着法**，避免场外提示），要求改选，不允许坚持；新着法同样要查（最多 `MATE_GUARD_ROUNDS` 轮），仍未解决时改用候选里、再不行从合法着法里不会被一步杀的着法。另外，任一方存在一步杀时不背谱、不进开局快速模式、不直接续走主变；对方有一步杀威胁时，prompt 里只提醒一句"存在"，我方有一步杀则不告诉模型。
+- **落子前 hook 流水线**：丢子守卫、自检、将杀守卫都登记在 `bot/hooks.py` 的 `PRE_MOVE_HOOKS` 里，按顺序执行：每个 hook 接收当前着法，可以放行、让模型改选或直接替换。`recheck` 的规则类守卫在后面的 hook 改了着法时重跑（自检改出来的着法同样过丢子守卫）；`final` 的 hook（将杀守卫）改出来的着法不再触发重跑。加新守卫只需写一个函数并登记。
+- **技能（skill）**：`skills/<name>/SKILL.md`，从过往对局总结出的、某类局面的做法与检查清单（先处理威胁、守住王翼、优势收官、劣势止损、封锁通路兵、王兵残局……）。参照 Claude Code 的 skill 做渐进式披露：所有技能的一句话说明常驻系统提示，`when` 条件（阶段、子力差、王的位置、对方刚吃子、有子受攻、对方通路兵位置等，全部按规则判定）命中时把正文放进这一步的 prompt（每步最多 `SKILL_AUTO_MAX`=2 个），其余可由模型调用 `load_skill` 读取。技能是仓库里的普通文件，人可以直接改、用 git 审查。详见 [skills/README.md](skills/README.md)。
 - **面向人的棋盘表示**：不给 FEN。prompt 里是 ASCII 盘面 + 双方按子种分组的中文子力清单（`王 e1；后 d1；车 a1, h1 …`）+ 局面元信息（轮到谁、是否被将军、易位权、吃过路兵、50 步计数）+ 全部着法历史（SAN）。
 - **SAN 记谱**：合法着法列表、模型输出的 candidates/pv/move 全部用 SAN（内部再转 UCI 落子，同时兼容模型误写 UCI / `0-0`）。合法着法列表保留将军符号 `+`；将死的 `#` 也显示为 `+`，不暴露"一步杀"；prompt 里明确告诉模型"程序不区分将军和将杀，带 + 的着法可能直接将死"，免得把 `+` 当成只是将军。
 - **对方上一步描述**：明确告诉模型对方刚走了什么（SAN、子种、起止格、是否吃子/升变/易位）。
 - **RAG 双库**：
   - `data/openings.jsonl` — 开局库，启动时播种经典开局原则。
-  - `data/experience.jsonl` — 经验库，滚动增长，涵盖：实时局面快照、赛后自我反思、Stockfish 找到的 blunder 教训、聊天教练总结等。
-- **工具调用分层**：对局阶段只暴露 `search_opening_book` / `search_experience`；复盘阶段额外暴露 `analyze_with_stockfish`，从制度上隔离"对局期间无外部引擎"。
-- **Stockfish 强制复盘**：赛后扫描整盘 PGN 找所有 ≥200cp 的 blunder，每个让模型看走子前后两张盘面 + SAN 走法历史自行推理失误原因，提出替代走法，再用 Stockfish 评估替代走法的好坏，全部写入经验库。
+  - `data/experience.jsonl` — 经验库，滚动增长，涵盖：实时局面快照、赛后自我反思、Stockfish 找到的 blunder 教训、聊天教练总结等。默认**不在对局中使用**（`EXPERIENCE_IN_PLAY=0`），只作为整理技能的素材。
+- **经验库整理**：写入教训时，与已有同类教训相似度 ≥ `LESSON_MERGE_SIM`（0.90）的不再追加，而是给那一条的 `seen` 加一、把新说法存进 `variants`；模型据以给出的替代着法被 Stockfish 判为 mistake / blunder 的 blunder 教训（已被证伪）不写入。`python tidy_memory.py` 对旧库做同样的清理。
+- **工具调用分层**：对局阶段只暴露 `search_opening_book` / `load_skill`（`EXPERIENCE_IN_PLAY=1` 时加 `search_experience`）；复盘阶段额外暴露 `analyze_with_stockfish`，从制度上隔离"对局期间无外部引擎"。
+- **Stockfish 强制复盘**：赛后扫描整盘 PGN 找所有 ≥200cp 的 blunder，每个让模型看走子前后两张盘面 + SAN 走法历史自行推理失误原因，提出替代走法，再用 Stockfish 评估替代走法的好坏，全部写入经验库。各 blunder 的分析并行（`REVIEW_WORKERS`=4 个线程），自我反思、blunder 深挖、聊天总结、快照验证、背谱入库这几项也同时进行。
 - **聊天读取（只读）**：游戏中 `chatLine` 事件实时入队，附带当时 ply 与 SAN 走法历史，**对局中模型看不到**，赛后 `chat_review` 统一总结成 `[Chat-Lesson]` 写入经验库。
 - **3 次非法走法重试**：模型给出非法着法时把非法原因 + 合法列表回喂，重新生成；三次失败才随机选一个合法着法保底（不做任何局面判断，只避免超时/非法着法判负）。
 - **断线重连 + 自动接受挑战**：对局流断开时指数退避重连；自动接受标准规则挑战，其余拒绝。
@@ -45,19 +49,23 @@ Lichess 事件流 (berserk)
   主循环 (bot/lichess.py)
     ├── gameFull / gameState ─► 生成 board → 轮到我方时
     │                              └─ get_llm_move(board, prev_board, opp_last_move)   # bot/player.py
-    │                                    ├─ PLAY_TOOLS: search_experience / search_opening_book
-    │                                    ├─ 3 次非法重试
-    │                                    └─ 落子成功后把 board_summary 写入 experience_rag
+    │                                    ├─ skills.match_skills：按规则命中的技能正文放进 prompt
+    │                                    ├─ 工具：search_opening_book / load_skill（/ play_line）
+    │                                    ├─ 落子前 hook：丢子守卫 → 自检 → 将杀守卫   # bot/hooks.py
+    │                                    └─ 3 次非法重试
     │
     ├── chatLine ─────────────► 写入 chat_messages（附当时 ply 与 SAN 历史）
     │
-    └── 对局结束 ─────────────► post_game_review   (自我反思 + 可选 Stockfish)
-                                  blunder_deep_review (强制 Stockfish 扫 blunder)
-                                  chat_review        (聊天总结)
+    └── 对局结束 ─────────────► run_post_game（以下各项并行）       # bot/review.py
+                                  post_game_review    (自我反思 + 可选 Stockfish)
+                                  blunder_deep_review (强制 Stockfish 扫 blunder，逐个并行分析)
+                                    └─ skills.record_game（技能命中 / blunder 统计）
+                                  chat_review / 快照验证 / 背谱入库
                                         ▼
-                                experience_rag (RAG, numpy 余弦)
-                                        ▲
-                                        │（下一局通过 search_experience 召回）
+                                experience_rag（教训写入时合并重复）
+                                        │
+                                        ▼  python curate_skills.py（手动 / 定期）
+                                skills/*/SKILL.md ──► 下一局按局面自动加载
 ```
 
 ### 经验库：什么时候写 & 什么时候读
@@ -71,9 +79,21 @@ Lichess 事件流 (berserk)
 | 聊天总结 | `[Chat-Summary]` / `[Chat-Lesson]` / `[Chat-Raw]` | `chat_guidance` / `chat_raw` | 对局结束 |
 
 读取：
-- **自动召回**：每步用"阶段 + 双方子力 + 最近着法"检索 3 条教训类条目（不含整局总结 / 快照 / 替代走法评估），作为参考放进 prompt。`AUTO_RECALL_K=0` 可关闭。
-  实测当前库的召回相似度区分度很低（0.63–0.67），建议用本地对局 A/B 对比开关前后的表现再决定是否保留。
-- **主动检索**：模型可随时调用 `search_experience(query)` / `search_opening_book(query)`。
+- **整理成技能（默认）**：经验库的教训不直接进 prompt。`python curate_skills.py` 把还没整理过的教训交给模型分批归类：
+  归到现有技能、攒够 3 条以上的新主题起草新技能、太笼统或只针对某一盘的丢弃；再让模型把归来的教训并进技能原文
+  （合并重复、长度有上限），校验格式后写回 `skills/`，教训标记为已整理。改动用 `git diff skills/` 审查。
+  赛后统计（`data/skill_stats.json`：每个技能命中的局数、步数、其中 blunder 步数）会一起交给模型参考。
+- **对局中直接使用（`EXPERIENCE_IN_PLAY=1`，旧行为）**：每步用"阶段 + 双方子力 + 最近着法"检索 `AUTO_RECALL_K` 条教训
+  放进 prompt，并提供 `search_experience` 工具。实测召回相似度区分度很低（0.63–0.67），所以默认关闭。
+
+维护命令：
+
+```powershell
+python tidy_memory.py --dry-run   # 看看会删除 / 合并哪些教训
+python tidy_memory.py             # 删除被证伪的教训、合并重复（自动备份到 data/backup/）
+python curate_skills.py --dry-run # 看看教训会怎样归类、技能会怎样改
+python curate_skills.py           # 写回 skills/，然后 git diff skills/ 审查
+```
 
 ---
 
@@ -140,7 +160,12 @@ python main.py
 | `LLM_MAX_TOKENS` / `LLM_TEMPERATURE` | `8192` / `0.3` | 下棋阶段单次回复上限（含思考）与采样温度 |
 | `LLM_STREAM` | `1` | 流式请求（下棋与复盘都用），长思考不会被中转站网关超时（Cloudflare 524）掐断；正文、思考、工具调用、结束原因、usage 等片段由程序拼回完整响应 |
 | `LLM_TIMEOUT` / `LLM_RETRIES` | `180` / `1` | 读超时秒数（流式时是两个片段之间的最长等待）/ 还没收到数据就失败（连接错误、超时、429、5xx）时的重试次数。仍失败或流中途断开时降一档重新请求（断开前的思考按截断补救带回），最后一档也失败则随机走合法着法保底 |
-| `AUTO_RECALL_K` | `3` | 每步自动召回的经验条数，`0` 关闭 |
+| `SKILL_AUTO_MAX` | `2` | 每步最多按规则自动加载几个技能，`0` = 只能由模型调用 `load_skill` 读取 |
+| `SKILLS_DIR` / `SKILL_STATS_PATH` | `skills/`（项目根）/ `data/skill_stats.json` | 技能目录 / 赛后技能统计 |
+| `EXPERIENCE_IN_PLAY` | `0` | `1` 对局中使用经验库：每步自动召回 + 提供 `search_experience` 工具（旧行为） |
+| `AUTO_RECALL_K` | `3` | `EXPERIENCE_IN_PLAY=1` 时每步自动召回的经验条数，`0` 关闭 |
+| `LESSON_MERGE_SIM` | `0.90` | 教训写入时与已有同类教训相似度 ≥ 该值就合并（`seen` +1），不重复追加；`tidy_memory.py` 的默认阈值 |
+| `REVIEW_WORKERS` | `4` | 赛后复盘的并行线程数（逐个 blunder 分析、快照验证、技能整理） |
 | `BOOK_ENABLED` / `BOOK_PLAY_PROB` / `BOOK_NEG_PLAY_PROB` / `BOOK_FLOOR_CP` / `BOOK_MAX_MOVES` / `BOOK_PATH` | `1` / `0.6` / `0.2` / `-100` / `15` / `data/opening_book.json` | 背谱开关 / 命中后直接照走的基础概率（n=1 时的值）/ 评估为负的着法的照走概率分子（概率 = 它 / (n+1)）/ 入谱评估下限（cp，我方视角）/ 每局最多记几步 / 谱文件 |
 | `SELF_CHECK_ROUNDS` | `2` | 落子前自检最多轮数，`0` 关闭 |
 | `HANG_GUARD` / `HANG_GUARD_MIN` / `HANG_GUARD_ROUNDS` | `1` / `2` / `2` | 丢子守卫开关 / 净亏多少分才触发 / 最多复查轮数（`0` 轮 = 不问模型，直接换成候选里不丢子的着法） |
@@ -219,7 +244,8 @@ Prompt 顶部显式声明「只能走自己颜色的子，盘面 W* = 白，B* =
 - 你上一步定下的战略方针（`PLAN_MEMORY=1`）
 - 你上一步算出的主变与目的，以及对方是否按主变应着（`PV_MEMORY=1`）
 - 子力关系（`BOARD_RELATIONS=1`）
-- 经验库自动召回的教训（仅供参考）
+- 按局面自动加载的技能正文（最多 `SKILL_AUTO_MAX` 个；技能目录在系统提示末尾）
+- 经验库自动召回的教训（仅 `EXPERIENCE_IN_PLAY=1`）
 - 合法走法（SAN，带 + 表示将军）
 
 ---
@@ -229,7 +255,8 @@ Prompt 顶部显式声明「只能走自己颜色的子，盘面 W* = 白，B* =
 - LLM 在**中残局精确计算**上弱，开局靠模式识别，越到残局越容易丢子。
 - 每一步都开新 messages，跨步只保留上一步的战略方针（`PLAN_MEMORY`）和主变及其目的（`PV_MEMORY`），看不到上一步的完整思考。
 - 单次采样，没有 best-of-N 投票，中残局一次直觉错就落子。
-- 经验库无去重 / 淘汰策略，长期运行后向量检索噪音会变大。
+- 技能是否真的减少了 blunder 还没有系统评估；`data/skill_stats.json` 只是粗略统计（只算规则命中的技能，不算模型主动读取的）。
+- 技能整理依赖模型归类，归错的教训要在 `git diff skills/` 时人工发现。
 
 ---
 
@@ -241,14 +268,18 @@ lichess-bot/
 ├── bot/
 │   ├── config.py           # 全部环境变量配置
 │   ├── prompts.py          # 下棋阶段的全部提示词（系统提示、局面描述、复杂度判断、自检）
-│   ├── player.py           # 单步决策：复杂度分流 → LLM 选着 → 自检 → 非法重试 / 保底
+│   ├── player.py           # 单步决策：复杂度分流 → LLM 选着 → 落子前 hook → 非法重试 / 保底
+│   ├── hooks.py            # 落子前 hook 流水线：丢子守卫、自检、将杀守卫
+│   ├── guard.py            # 守卫用的规则计算（吃子交换模拟、一步杀检查、变化核对）
+│   ├── skills.py           # 技能：解析 SKILL.md、按规则匹配、load_skill、赛后统计
+│   ├── curate.py           # 把经验库的教训整理进技能
 │   ├── llm.py              # LLM 客户端、思考档位阶梯、截断补救
 │   ├── boardtext.py        # 盘面 / 子力 / SAN / PGN 的文字表示
 │   ├── board_view.py       # 子力关系与 play_line 分析棋盘
 │   ├── tools.py            # 模型可调用的工具
-│   ├── memory.py · rag.py  # 开局库 / 经验库（numpy 余弦）与自动召回
+│   ├── memory.py · rag.py  # 开局库 / 经验库（numpy 余弦）、教训合并、经验库整理
 │   ├── engine.py           # Stockfish（仅赛后复盘）
-│   ├── review.py           # 赛后复盘、blunder 深挖、聊天总结、快照验证
+│   ├── review.py           # 赛后复盘（并行）、blunder 深挖、聊天总结、快照验证
 │   ├── lichess.py          # Lichess 事件循环
 │   ├── live.py             # 实时状态输出（live/state.json）
 │   └── logger_setup.py     # 日志 + stdout/stderr 重定向
@@ -256,7 +287,10 @@ lichess-bot/
 ├── local_play.py           # 本地对局（默认对手随机走子；也可 Stockfish / 人类 / 自对弈）
 ├── laya_play.py            # 用 Laya 分类模型下棋的本地对局（与 LLM 无关）
 ├── viewer.py + web/        # 观战页面
+├── skills/                 # 技能：<name>/SKILL.md（格式与触发条件见 skills/README.md）
 ├── reembed.py              # 换 embedding 后重建向量
+├── tidy_memory.py          # 整理经验库：删除被证伪的教训、合并重复
+├── curate_skills.py        # 把经验库的教训整理进技能
 ├── upgrade-to-bot.py       # 把普通账号升级为 BOT
 ├── requirements.txt
 ├── .env.example

@@ -118,6 +118,16 @@ def alt_verdict(entry: dict) -> str:
     return m.group(1) if m else ""
 
 
+def refuted_lessons(entries: list[dict]) -> list[dict]:
+    """被证伪的 blunder 教训：同一个 blunder（time + ply 相同）里模型给出的替代着法被 Stockfish 判为
+    mistake / blunder。新条目的结论记在 meta.alt_verdict，旧条目要从对应的 [Blunder-AltMove] 文本里找。"""
+    refuted_keys = {(e["meta"].get("time"), e["meta"].get("ply")) for e in entries
+                    if e["meta"].get("kind") == "blunder_alt_eval" and alt_verdict(e) in BAD_VERDICTS}
+    return [e for e in entries if e["meta"].get("kind") == "blunder"
+            and (e["meta"].get("alt_verdict") in BAD_VERDICTS
+                 or (e["meta"].get("time"), e["meta"].get("ply")) in refuted_keys)]
+
+
 def consolidate(store: RAGStore, threshold: float, dry_run: bool = False) -> dict:
     """整理经验库（离线，tidy_memory.py 调用）：
     1. 删除被证伪的 blunder 教训：同一个 blunder 的替代着法被 Stockfish 判为 mistake / blunder，
@@ -126,11 +136,7 @@ def consolidate(store: RAGStore, threshold: float, dry_run: bool = False) -> dic
        其余的原文存进 meta.variants（见 rag.merge_into）。
     返回 {"refuted": [...], "merged": [(保留的, 被并入的), ...]}；dry_run 时只报告不改文件。"""
     entries = store.entries
-    refuted_keys = {(e["meta"].get("time"), e["meta"].get("ply")) for e in entries
-                    if e["meta"].get("kind") == "blunder_alt_eval" and alt_verdict(e) in BAD_VERDICTS}
-    refuted = [e for e in entries if e["meta"].get("kind") == "blunder"
-               and (e["meta"].get("alt_verdict") in BAD_VERDICTS
-                    or (e["meta"].get("time"), e["meta"].get("ply")) in refuted_keys)]
+    refuted = refuted_lessons(entries)
     gone = {id(e) for e in refuted}
 
     merged: list[tuple[dict, dict]] = []

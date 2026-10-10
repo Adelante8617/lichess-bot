@@ -93,8 +93,16 @@ MATERIAL_LEAD_SKIP = int(os.getenv("MATERIAL_LEAD_SKIP", "12"))
 MATERIAL_LEAD_EFFORT = os.getenv("MATERIAL_LEAD_EFFORT", "low").strip().lower()
 
 
-# 每步自动召回的经验条数；设为 0 关闭自动召回（只保留模型主动调用 search_experience）
-AUTO_RECALL_K = int(os.getenv("AUTO_RECALL_K", "3"))
+# ---- 技能（skill）：skills/<name>/SKILL.md，按局面规则自动加载，或由模型调用 load_skill 读取 ----
+SKILLS_DIR = os.getenv("SKILLS_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                                     "skills")
+SKILL_AUTO_MAX = int(os.getenv("SKILL_AUTO_MAX", "2"))   # 每步最多自动加载几个技能，0 = 只能用 load_skill 读取
+SKILL_STATS_PATH = os.getenv("SKILL_STATS_PATH", os.path.join("data", "skill_stats.json"))
+
+# 经验库在对局中的使用。默认 0：对局中只用技能，经验库（赛后写入的零散教训）只作为整理技能的素材；
+# 1 = 恢复旧行为：每步自动召回 AUTO_RECALL_K 条，并提供 search_experience 工具
+EXPERIENCE_IN_PLAY = os.getenv("EXPERIENCE_IN_PLAY", "0") == "1"
+AUTO_RECALL_K = int(os.getenv("AUTO_RECALL_K", "3")) if EXPERIENCE_IN_PLAY else 0
 SELF_CHECK_ROUNDS = int(os.getenv("SELF_CHECK_ROUNDS", "2"))   # 0 关闭落子前自检
 # 丢子守卫：落子前按规则模拟对方的吃子交换（SEE），会净亏 ≥ HANG_GUARD_MIN 分时把模拟结果交给模型复查；
 # 模型改选后再查新着法，最多 HANG_GUARD_ROUNDS 轮。轮数用完仍会丢子、模型又给不出拿回子力的具体变化时，
