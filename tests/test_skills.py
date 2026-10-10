@@ -75,6 +75,14 @@ class PredicateTest(unittest.TestCase):
         self.assertFalse(self.check("threatened", True, board))
         board = board_after("e4", "e5", "Nf3", "Nc6", "d4", "a6", "d5")  # 兵攻马
         self.assertTrue(self.check("threatened", True, board))
+        self.assertFalse(self.check("threatened_min", 2, board))
+
+    def test_threatened_min_fork(self):
+        # e4 兵同时攻 Qd3 与 Nf3（实战局面），算双攻
+        board = chess.Board("r1b2rk1/1p1nb3/3p2pp/2qP1p2/P3p3/2NQPN1P/2P1B1P1/2R1R1K1 w - - 0 21")
+        self.assertEqual(skills.threatened_count(board), 2)
+        self.assertTrue(self.check("threatened_min", 2, board))
+        self.assertIn("fork-damage-control", [s["name"] for s in skills.match_skills(board, skills.load_skills(testenv.SKILLS_ROOT))])
 
     def test_passer_rank(self):
         board = chess.Board("8/2P5/8/8/8/8/5k2/K7 b - - 0 1")

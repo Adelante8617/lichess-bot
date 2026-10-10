@@ -49,9 +49,11 @@ def last_move_captured(board: chess.Board) -> bool:
     return before.is_capture(move)
 
 
-def threatened(board: chess.Board) -> bool:
-    """轮到走的一方有没有马、象、车、后正被攻击，且攻击者价值更低、或这个子没有保护。"""
+def threatened_count(board: chess.Board) -> int:
+    """轮到走的一方有几个马、象、车、后正被攻击，且攻击者价值更低、或这个子没有保护。
+    ≥2 就是双攻（叉子、抽将后的闪击等）：一步只能救一个。"""
     me = board.turn
+    count = 0
     for pt in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN):
         for sq in board.pieces(pt, me):
             attackers = board.attackers(not me, sq)
@@ -59,8 +61,13 @@ def threatened(board: chess.Board) -> bool:
                 continue
             cheapest = min(PIECE_VALUES.get(board.piece_type_at(a), 100) for a in attackers)
             if cheapest < PIECE_VALUES[pt] or not board.attackers(me, sq):
-                return True
-    return False
+                count += 1
+    return count
+
+
+def threatened(board: chess.Board) -> bool:
+    """轮到走的一方有没有马、象、车、后正被攻击，且攻击者价值更低、或这个子没有保护。"""
+    return threatened_count(board) > 0
 
 
 def passer_rank(board: chess.Board, color: bool) -> int:
@@ -109,6 +116,7 @@ PREDICATES = {
     "in_check": lambda b, v: b.is_check() == bool(v),
     "opp_captured": lambda b, v: last_move_captured(b) == bool(v),            # 对方上一步吃了子
     "threatened": lambda b, v: threatened(b) == bool(v),                      # 我方有子被更低价值的子攻击或无保护被攻击
+    "threatened_min": lambda b, v: threatened_count(b) >= int(v),             # 这样受威胁的子至少几个（2 = 被双攻）
     "opp_passer_min": lambda b, v: passer_rank(b, not b.turn) >= int(v),      # 对方通路兵已到第几横排（对方视角）
     "my_passer_min": lambda b, v: passer_rank(b, b.turn) >= int(v),
     "my_color": lambda b, v: ("white" if b.turn == chess.WHITE else "black") in _as_list(v),
@@ -128,6 +136,7 @@ PREDICATE_DOCS = {
     "in_check": "true / false：我方正被将军",
     "opp_captured": "true / false：对方上一步吃了子",
     "threatened": "true / false：我方有马象车后被更低价值的子攻击、或被攻击且没有保护",
+    "threatened_min": "整数：上面这样受威胁的马象车后至少有几个（2 表示被双攻 / 叉子）",
     "opp_passer_min / my_passer_min": "对方 / 我方最靠前的通路兵已到第几横排（整数 1-8，按该方视角）",
     "my_color": '"white" / "black"',
     "opening": '对局着法以其中之一开头（纯 SAN 前缀列表，如 ["e4 e6"]）',

@@ -47,6 +47,7 @@ when:
 | `in_check` | `true` / `false` | 我方正被将军 |
 | `opp_captured` | `true` / `false` | 对方上一步吃了子 |
 | `threatened` | `true` / `false` | 我方有马象车后被更低价值的子攻击，或被攻击且没有保护 |
+| `threatened_min` | 整数 | 上面这样受威胁的马象车后至少有几个（`2` = 被双攻 / 叉子） |
 | `opp_passer_min` / `my_passer_min` | 整数 1-8 | 对方 / 我方最靠前的通路兵已到第几横排（按该方视角） |
 | `my_color` | `white` / `black` | 我方执哪一方 |
 | `opening` | SAN 前缀列表，如 `["e4 e6"]` | 对局着法以其中之一开头（纯 SAN，不带回合号） |
