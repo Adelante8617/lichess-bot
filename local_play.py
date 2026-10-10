@@ -26,6 +26,7 @@ import chess.engine
 import chess.pgn
 
 import main as bot  # 导入不会启动 Lichess 主循环
+from bot.board_view import game_result
 from bot.live import live
 
 
@@ -110,7 +111,7 @@ def main():
     snapshots: list = []  # 待验证快照，赛后由 Stockfish 验证后入库
 
     try:
-        while not board.is_game_over(claim_draw=True) and board.ply() < args.max_plies:
+        while not game_result(board) and board.ply() < args.max_plies:
             prev = chess.Board()
             for u in uci_list[:-1]:
                 prev.push_uci(u)
@@ -138,7 +139,7 @@ def main():
         if engine:
             engine.quit()
 
-    result = board.result(claim_draw=True) if board.is_game_over(claim_draw=True) else "*"
+    result = game_result(board) or "*"
     print(f"\n=== 对局结束：{result}  ({board.ply()} plies) ===")
 
     live.set_status("reviewing" if not args.no_review else "finished", result)

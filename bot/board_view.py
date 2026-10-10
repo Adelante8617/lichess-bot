@@ -21,6 +21,18 @@ DIRS[chess.QUEEN] = DIRS[chess.ROOK] + DIRS[chess.BISHOP]
 MAX_LINE_PLIES = 12
 
 
+def game_result(board: chess.Board) -> str | None:
+    """对局已结束则返回比分，否则 None。
+    三次重复 / 50 回合只在棋盘上真的出现时才判和；python-chess 的 claim_draw 会把
+    "下一步可以造成重复"也算进去，等于替占优方申请和棋，而占优方本可以变着避开。"""
+    outcome = board.outcome()  # 将死、逼和、子力不足、五次重复、75 回合
+    if outcome:
+        return outcome.result()
+    if board.is_repetition(3) or board.halfmove_clock >= 100:
+        return "1/2-1/2"
+    return None
+
+
 def pname(board: chess.Board, sq: int) -> str:
     """'白马f3' 形式。"""
     p = board.piece_at(sq)
@@ -162,8 +174,8 @@ def play_line(board: chess.Board, moves: list) -> str:
         out.append(f"终点：{SIDE_ZH[b.turn]}方无子可动，逼和。")
     elif b.is_insufficient_material():
         out.append("终点：双方子力不足以将杀，和棋。")
-    elif b.can_claim_draw():
-        out.append("终点：可按重复局面或 50 步规则判和。")
+    elif game_result(b):
+        out.append("终点：已出现三次重复局面或满 50 回合，和棋。")
     out.append(f"终点轮到{SIDE_ZH[b.turn]}方走" + ("，正被将军" if b.is_check() else ""))
     out.append(f"子力：白 {_material(b, chess.WHITE)}；黑 {_material(b, chess.BLACK)}")
     out.append(render_board(b))

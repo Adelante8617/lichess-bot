@@ -36,6 +36,7 @@ import chess.engine
 import chess.pgn
 from dotenv import load_dotenv
 
+from bot.board_view import game_result
 from bot.live import live
 
 load_dotenv()
@@ -286,7 +287,7 @@ def main():
     uci_list: list[str] = []
     last_san = None  # 对方上一步的 SAN，写进 Laya 的局面描述
     try:
-        while not board.is_game_over(claim_draw=True) and board.ply() < args.max_plies:
+        while not game_result(board) and board.ply() < args.max_plies:
             if board.turn == my_white:
                 ply = board.ply() + 1
                 print(f"\n--- ply {ply} Laya 走子 ---")
@@ -318,7 +319,7 @@ def main():
         if engine:
             engine.quit()
 
-    result = board.result(claim_draw=True) if board.is_game_over(claim_draw=True) else "*"
+    result = game_result(board) or "*"
     print(f"\n=== 对局结束：{result}  ({board.ply()} plies) ===")
     live.set_status("finished", result)
     names = ("Laya", opp_label) if my_white else (opp_label, "Laya")
