@@ -293,6 +293,23 @@ def hang_guard_prompt(san: str, fact: str, legal_sans: list[str], rejected: dict
  "line": "tactical 时填对方吃子之后的具体变化（SAN 序列），否则留空", "reason": "≤80 字"}}"""
 
 
+def hang_guard_pick_prompt(rejected: dict[str, str], safe_sans: list[str]) -> str:
+    """丢子守卫的兜底：前几轮的着法都查出会丢子、候选里也没有不丢子的，
+    让模型在程序按规则筛出的不丢子着法里挑一个。名单只说明"按交换模拟不丢子"，不替模型排序。"""
+    lines = "\n".join(f"- {m}：{r}" for m, r in rejected.items())
+    return f"""落子前的补充核对：下面这些着法按吃子交换模拟都会丢子，不能走：
+{lines}
+
+程序按规则检查了全部合法着法，走完之后对方没有净赚的吃子交换的只有这些：
+{", ".join(safe_sans)}
+（模拟同样不考虑捉双、牵制、闪击等战术，只排除了直接丢子。）
+
+请只在这份名单里选一个：先想清楚对方此刻的威胁，再选最能应对威胁、最符合你的方针的一步。
+
+严格输出 JSON（不要 markdown）：
+{{"move": "名单里的一个着法（SAN）", "reason": "≤80 字"}}"""
+
+
 def mate_guard_prompt(san: str, legal_sans: list[str], rejected: list[str]) -> str:
     """将杀守卫：程序查到走完 san 后对方有一步杀。只告诉存在，不给对方的着法；不允许坚持原着。"""
     rejected_section = (f"\n下面这些着法同样查到会被一步将杀，也不能走：{', '.join(rejected)}\n"

@@ -50,8 +50,9 @@ class FakeClient:
     """按提示词种类返回预设回答；self_check_replies 依次用于每轮自检。"""
 
     def __init__(self, decision: dict, self_check_replies: list[dict], complexity="medium",
-                 guard_replies: list[dict] | None = None):
+                 guard_replies: list[dict] | None = None, pick_replies: list[dict] | None = None):
         self.decision = decision
+        self.pick_replies = list(pick_replies or [])
         self.self_check_replies = list(self_check_replies)
         self.guard_replies = list(guard_replies or [])
         self.complexity = complexity
@@ -66,6 +67,8 @@ class FakeClient:
             return _msg(json.dumps({"complexity": self.complexity, "reason": "测试"}, ensure_ascii=False))
         if "程序做了一个简单的吃子交换模拟" in last:
             return _msg(json.dumps(self.guard_replies.pop(0), ensure_ascii=False))
+        if "只在这份名单里选一个" in last:
+            return _msg(json.dumps(self.pick_replies.pop(0), ensure_ascii=False))
         if "落子前" in last and "复查" in last:
             return _msg(json.dumps(self.self_check_replies.pop(0), ensure_ascii=False))
         return _msg(json.dumps(self.decision, ensure_ascii=False))
@@ -206,6 +209,53 @@ class HangGuardTest(unittest.TestCase):
         mv, records = player.hang_guard(self.board, [], self.board.parse_san("Re2"), self.legal, [])
         self.assertEqual(records, [])
         self.assertEqual(llm._client.prompts, [])
+
+
+# 日志 20261010_012422：白第 24 步。候选 Qxe6、Bxa7 都丢子，守卫两轮 Rc2 → Qxd7 → Rc3，
+# 旧逻辑把从没复查过的 Rc3 当"原着法"保持，Qa5xc3 白丢车
+PLY47 = "4r1k1/p2n1pp1/2Q1bb1p/q1B1p3/4P3/3P1N1P/Pr2BPP1/2R1R1K1 w - - 1 24"
+# 同一盘白第 26 步：Bd4 → Qxe6 → 想改回 Bd4 被拒，旧逻辑走了模型已放弃的 Qxe6；按规则只有 d4 不丢子
+PLY51 = "4r1k1/p2n1pp1/2Q1bb1p/2B1p3/4P3/2qP1N1P/P3RPP1/6K1 w - - 0 26"
+
+
+class HangGuardFallbackTest(unittest.TestCase):
+    def run_guard(self, fen, first, replies, candidates, picks=()):
+        board = chess.Board(fen)
+        llm._client = FakeClient({}, [], guard_replies=replies, pick_replies=list(picks))
+        mv, records = player.hang_guard(board, [], board.parse_san(first), list(player.legal_san_map(board)),
+                                        candidates)
+        return board.san(mv), records, llm._client
+
+    def test_unchecked_last_change_is_not_kept(self):
+        san, records, client = self.run_guard(PLY47, "Rc2", [change("Qxd7"), change("Rc3")],
+                                              ["Qxe6", "Bxa7"], picks=[{"move": "a3", "reason": "安全"}])
+        self.assertEqual(san, "a3")
+        self.assertEqual(records[-1]["outcome"], "fallback_pick")
+        self.assertIn("Rc3", client.prompts[-1])     # 名单前列出已查出丢子的 Rc3
+        self.assertNotIn("Rc3,", client.prompts[-1].split("只有这些")[1])
+
+    def test_invalid_pick_uses_least_loss_safe_move(self):
+        board = chess.Board(PLY47)
+        san, records, _ = self.run_guard(PLY47, "Rc2", [change("Qxd7"), change("Rc3")],
+                                         ["Qxe6", "Bxa7"], picks=[{"move": "Rc3", "reason": "坚持"}])
+        self.assertEqual(records[-1]["outcome"], "fallback_legal")
+        self.assertLess(guard.material_risk(board, board.parse_san(san))["loss"], 2)
+
+    def test_flip_back_uses_only_safe_legal_move(self):
+        san, records, _ = self.run_guard(PLY51, "Bd4", [change("Qxe6"), change("Bd4")],
+                                         ["Qxe6"], picks=[{"move": "d4", "reason": "唯一不丢子"}])
+        self.assertEqual(san, "d4")
+
+    def test_all_moves_lose_takes_least_loss(self):
+        # 白马 h1 被困：走马被兵吃、走王被象吃，所有着法都净亏 3；Ng3 → Nf2 → 想改回 Ng3 被拒
+        fen = "7k/8/8/3b4/7p/4p3/8/K6N w - - 0 1"
+        board = chess.Board(fen)
+        losses = {board.san(m): guard.material_risk(board, m)["loss"] for m in board.legal_moves}
+        self.assertGreaterEqual(min(losses.values()), 2)
+        san, records, _ = self.run_guard(fen, "Ng3", [change("Nf2"), change("Ng3")], [])
+        self.assertEqual(losses[san], min(losses.values()))
+        self.assertIn(san, ("Ng3", "Nf2"))  # 同分时优先模型提过的着法
+        self.assertIn(records[-1]["outcome"], ("least_loss", "unresolved"))
 
 
 class BookTest(unittest.TestCase):

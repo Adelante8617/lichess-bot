@@ -21,8 +21,8 @@ from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
 from .memory import recall_experience
 from .prompts import (STRATEGY_STAGE_PROMPT, book_warning_section, complexity_prompt,
-                      hang_guard_prompt, mate_guard_prompt, prev_line_section, self_check_prompt, strategy_stage_section,
-                      system_prompt, user_prompt)
+                      hang_guard_pick_prompt, hang_guard_prompt, mate_guard_prompt, prev_line_section,
+                      self_check_prompt, strategy_stage_section, system_prompt, user_prompt)
 from .tools import play_tools, run_tool
 
 
@@ -173,8 +173,9 @@ def hang_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans:
       摆不通就把摆出的事实交回模型，进入下一轮。
     - 模型坚持并说明局面性补偿（positional）：净亏 ≤ HANG_GUARD_POSITIONAL 时照走，不要求变化。
     - 模型改选：新着法同样要过守卫。
-    轮数用完仍未解决时，从模型自己的 candidates 里挑第一个不丢子的着法（都丢子则保持原着法）。
-    每条记录带 outcome（kept_tactical / kept_positional / changed / fallback / unresolved），供赛后统计。"""
+    轮数用完仍未解决时走 _guard_fallback：候选里不丢子的 → 全部合法着法里不丢子的 → 净亏最小的。
+    每条记录带 outcome（kept_tactical / kept_positional / changed / fallback / fallback_pick /
+    fallback_legal / least_loss / unresolved），供赛后统计。"""
     records: list[dict] = []
     current = move
     rejected: dict[chess.Move, str] = {}  # 模型自己放弃的、会丢子的着法 → 模拟结果
@@ -230,22 +231,56 @@ def hang_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans:
         rec["outcome"], rec["changed_to"] = "changed", display_san(board, new)
         print(f"[GUARD] 改选 {san} -> {rec['changed_to']}")
         current = new
-    if material_risk(board, current)["loss"] < HANG_GUARD_MIN:
+    risk = material_risk(board, current)
+    if risk["loss"] < HANG_GUARD_MIN:
         return current, records
-    rejected[current] = ""
-    for text in candidates:
-        mv = parse_model_move(board, text)
-        if mv is not None and mv not in rejected and material_risk(board, mv)["loss"] < HANG_GUARD_MIN:
-            outcome, note = "fallback", f"复查后仍未解决，改用候选里不丢子的 {display_san(board, mv)}"
-            break
-    else:
-        mv = current
-        outcome, note = "unresolved", "复查后仍未解决，但候选里没有不丢子的着法，保持原着法"
+    # current 可能是最后一轮改出来、从没被复查过的着法，不能当作"原着法"保持
+    rejected[current] = risk_text(board, current, risk)
+    mv, outcome, note = _guard_fallback(board, messages, current, candidates, rejected, levels, max_tokens)
     print(f"[GUARD] {note}")
     records.append({"round": len(records) + 1, "checked": display_san(board, current),
                     "checked_uci": current.uci(), "outcome": outcome, "note": note,
                     **({"changed_to": display_san(board, mv)} if mv != current else {})})
     return mv, records
+
+
+def _guard_fallback(board: chess.Board, messages: list, current: chess.Move, candidates: list[str],
+                    rejected: dict[chess.Move, str], levels: list[str] | None,
+                    max_tokens: int | None) -> tuple[chess.Move, str, str]:
+    """丢子守卫轮数用完仍会丢子时的兜底，返回 (着法, outcome, note)：
+    1. 模型候选里第一个不丢子的；
+    2. 全部合法着法里按规则不丢子的：交给模型在这份名单里挑一个，挑不出就取净亏最小的；
+    3. 都会丢子：取全部合法着法里净亏最小的（同分时优先模型提过的着法）。"""
+    loss = {m: material_risk(board, m)["loss"] for m in board.legal_moves}
+    for text in candidates:
+        mv = parse_model_move(board, text)
+        if mv is not None and mv not in rejected and loss[mv] < HANG_GUARD_MIN:
+            return mv, "fallback", f"复查后仍未解决，改用候选里不丢子的 {display_san(board, mv)}"
+    safe = sorted((m for m in loss if loss[m] < HANG_GUARD_MIN and m not in rejected), key=loss.get)
+    if safe:
+        safe_sans = [display_san(board, m) for m in safe]
+        print(f"[GUARD] 候选都会丢子，按规则不丢子的合法着法：{', '.join(safe_sans)}")
+        live.stage("丢子守卫：从不丢子的着法里改选")
+        prompt = hang_guard_pick_prompt({display_san(board, m): r for m, r in rejected.items()}, safe_sans)
+        pick = None
+        try:
+            msg, _ = llm_call(messages + [{"role": "user", "content": prompt}], levels=levels,
+                              max_tokens=max_tokens)
+            content = (msg.content or "").strip()
+            print(f"[GUARD pick] {content}")
+            log_reasoning("GUARD pick", reasoning_of(msg))
+            pick = parse_model_move(board, str((extract_json(content) or {}).get("move", "")))
+        except Exception as e:
+            print(f"[GUARD] LLM failed: {e}")
+        if pick in safe:
+            return pick, "fallback_pick", f"复查后仍未解决，从不丢子的合法着法里改选 {display_san(board, pick)}"
+        return safe[0], "fallback_legal", f"复查后仍未解决，改用合法着法里不丢子的 {display_san(board, safe[0])}"
+    proposed = set(rejected) | {m for m in (parse_model_move(board, c) for c in candidates) if m is not None}
+    mv = min(loss, key=lambda m: (loss[m], m not in proposed))
+    if mv == current:
+        return mv, "unresolved", f"所有合法着法都会丢子，{display_san(board, mv)} 已是净亏最小的"
+    return mv, "least_loss", (f"所有合法着法都会丢子，改用净亏最小的 {display_san(board, mv)}"
+                              f"（净亏 {loss[mv]}，{display_san(board, current)} 净亏 {loss[current]}）")
 
 
 def mate_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans: list[str],

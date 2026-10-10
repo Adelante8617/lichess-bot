@@ -98,7 +98,8 @@ AUTO_RECALL_K = int(os.getenv("AUTO_RECALL_K", "3"))
 SELF_CHECK_ROUNDS = int(os.getenv("SELF_CHECK_ROUNDS", "2"))   # 0 关闭落子前自检
 # 丢子守卫：落子前按规则模拟对方的吃子交换（SEE），会净亏 ≥ HANG_GUARD_MIN 分时把模拟结果交给模型复查；
 # 模型改选后再查新着法，最多 HANG_GUARD_ROUNDS 轮。轮数用完仍会丢子、模型又给不出拿回子力的具体变化时，
-# 改用模型自己候选里不丢子的那个（没有则保持原着法）。这是对局中唯一由程序计算的检查
+# 改用模型自己候选里不丢子的那个；候选都丢子时让模型从全部合法着法里按规则不丢子的名单中挑，
+# 一个不丢子的都没有就走净亏最小的。这是对局中唯一由程序计算的检查
 HANG_GUARD = os.getenv("HANG_GUARD", "1") == "1"
 HANG_GUARD_MIN = int(os.getenv("HANG_GUARD_MIN", "2"))      # 默认 2：放过弃一兵的开局弃兵
 HANG_GUARD_ROUNDS = int(os.getenv("HANG_GUARD_ROUNDS", "2"))
