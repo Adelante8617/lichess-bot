@@ -124,6 +124,9 @@ SELF_CHECK_EFFORT = os.getenv("SELF_CHECK_EFFORT", "low").strip().lower()
 
 SNAPSHOT_OK_DELTA = 50        # 走子后己方评估损失 < 该值（cp）才算"好棋"，才允许入库
 SNAPSHOT_DEDUPE_SIM = 0.95    # 与已有条目余弦相似度 ≥ 该值则视为重复，跳过
+# 教训类条目写入时，与已有同类教训余弦相似度 ≥ 该值就合并（seen +1），不再重复追加。
+# 实测（768 维 embedding）≥0.90 基本是同一条教训换了说法，0.88 左右已是相关但不同的教训
+LESSON_MERGE_SIM = float(os.getenv("LESSON_MERGE_SIM", "0.90"))
 # 赛后复盘的并行线程数：逐个 blunder 的分析、快照的 Stockfish 验证各自用这么多线程（每个线程一个 Stockfish 进程）
 REVIEW_WORKERS = int(os.getenv("REVIEW_WORKERS", "4"))
 

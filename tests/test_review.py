@@ -3,17 +3,12 @@
 运行：python -m unittest discover -s tests
 """
 import json
-import os
-import sys
-import tempfile
 import threading
 import time
 import types
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
-os.chdir(tempfile.mkdtemp(prefix="lichess-bot-test-"))
+import testenv  # noqa: F401  必须在导入 bot 之前：切临时目录、钉死开关
 
 import chess  # noqa: E402
 
@@ -44,9 +39,11 @@ def fake_blunder(ply: int, san: str) -> dict:
 class BlunderReviewTest(unittest.TestCase):
     def setUp(self):
         self.saved = {k: getattr(review, k) for k in
-                      ("stockfish_collect_blunders", "stockfish_eval_move", "complete", "experience_rag")}
+                      ("stockfish_collect_blunders", "stockfish_eval_move", "complete", "experience_rag",
+                       "add_lesson")}
         self.store = FakeStore()
         review.experience_rag = self.store
+        review.add_lesson = lambda text, meta: self.store.add(text, meta) and "added"
 
     def tearDown(self):
         for k, v in self.saved.items():

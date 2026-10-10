@@ -10,7 +10,7 @@ from .book import commit_opening_book
 from .config import MODEL, REVIEW_WORKERS, SNAPSHOT_DEDUPE_SIM, SNAPSHOT_OK_DELTA
 from .engine import stockfish_collect_blunders, stockfish_eval_move
 from .llm import complete, extract_json
-from .memory import experience_rag
+from .memory import BAD_VERDICTS, add_lesson, experience_rag
 from .tools import REVIEW_TOOLS, run_tool
 
 
@@ -91,8 +91,7 @@ PGN:
             "time": datetime.now().isoformat()}
     for ls in lessons:
         if isinstance(ls, str) and ls.strip():
-            print(f"[REVIEW] +lesson: {ls}")
-            experience_rag.add(ls.strip(), meta)
+            print(f"[REVIEW] +lesson ({add_lesson(ls.strip(), meta)}): {ls}")
     experience_rag.add(f"[复盘] {summary}", meta)
     print(f"[REVIEW] experience size = {len(experience_rag)}")
 
@@ -186,22 +185,27 @@ def blunder_deep_review(pgn_text: str, result: str, my_color: str) -> list[dict]
         if a is None:
             continue
         sf_eval = a["sf_eval"]
+        evaluated = isinstance(sf_eval, dict) and "error" not in sf_eval
+        verdict = sf_eval.get("verdict", "?") if evaluated else ""
         meta = dict(meta_base)
         meta.update({"ply": b["ply"], "side": b["side"],
                      "actual_move": b["san"], "best": b["best_san"],
                      "delta": b["delta"]})
+        if verdict:
+            meta["alt_verdict"] = verdict
 
-        # 写入主 lesson
-        if a["lesson"]:
+        # 写入主 lesson。模型据此给出的替代着法被 Stockfish 判为 mistake / blunder 时，
+        # 这条"应对原则"已被证伪，不写入（替代走法评估照常记录）
+        if a["lesson"] and verdict in BAD_VERDICTS:
+            print(f"[BLUNDER {i}] lesson 不写入：替代着法 {a['better']} 被 Stockfish 判为 {verdict}")
+        elif a["lesson"]:
             entry = (f"[Blunder-Lesson] {a['lesson']} "
                      f"(局面: ply{b['ply']} {b['side']}方走 {b['san']}, "
                      f"引擎推荐 {b['best_san']}, Δ={b['delta']}cp)")
-            print(f"[BLUNDER {i}] +lesson: {entry[:120]}")
-            experience_rag.add(entry, meta)
+            print(f"[BLUNDER {i}] +lesson ({add_lesson(entry, meta)}): {entry[:120]}")
 
         # 写入模型对自身替代走法的评估
-        if isinstance(sf_eval, dict) and "error" not in sf_eval:
-            verdict = sf_eval.get("verdict", "?")
+        if evaluated:
             entry2 = (
                 f"[Blunder-AltMove] 走法历史: {b['history'] or '（开局）'} | "
                 f"模型替代走法 {a['better']} 理由: {a['reason']} | "
@@ -268,8 +272,8 @@ lessons 数量 1~5 条；只保留有普适价值的内容，闲聊忽略。"""
         print(f"[CHAT-REVIEW] +summary: {summary[:120]}")
     for ls in lessons:
         if isinstance(ls, str) and ls.strip():
-            experience_rag.add(f"[Chat-Lesson] {ls.strip()}", meta)
-            print(f"[CHAT-REVIEW] +lesson: {ls.strip()[:120]}")
+            status = add_lesson(f"[Chat-Lesson] {ls.strip()}", meta)
+            print(f"[CHAT-REVIEW] +lesson ({status}): {ls.strip()[:120]}")
     # 同时把原始聊天存档供未来回溯
     experience_rag.add(
         f"[Chat-Raw] {joined[:800]}",

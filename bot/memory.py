@@ -1,13 +1,15 @@
 """RAG：开局库 + 经验记忆库，以及每步的经验自动召回。"""
+import re
 import threading
 
 import chess
+import numpy as np
 from openai import OpenAI
 
 from .boardtext import COLOR_ZH, game_phase, material_text, san_history
 from .config import (AUTO_RECALL_K, EMBED_API_KEY, EMBED_BACKEND, EMBED_BASE_URL, EMBED_DEVICE,
-                     EMBED_LOCAL_MODEL, EMBED_MODEL, EMBED_QUERY_PREFIX)
-from .rag import RAGStore
+                     EMBED_LOCAL_MODEL, EMBED_MODEL, EMBED_QUERY_PREFIX, LESSON_MERGE_SIM)
+from .rag import RAGStore, merge_into
 
 _emb_client = None
 _local_embedder = None
@@ -94,6 +96,67 @@ def is_lesson(entry: dict) -> bool:
     """自动召回只取"教训"类条目：不含整局总结、局面快照、替代走法评估、聊天原文。"""
     return (entry["meta"].get("kind") in (None, "blunder", "chat_guidance")
             and not entry["text"].startswith(("[复盘]", "[Chat-Summary]")))
+
+
+def add_lesson(text: str, meta: dict) -> str:
+    """写入一条教训：已有几乎相同的同类教训时合并计数（seen +1），不重复追加。返回 "added" / "merged"。"""
+    kind = meta.get("kind")
+    return experience_rag.upsert(text, meta, LESSON_MERGE_SIM,
+                                 filter_fn=lambda e: is_lesson(e) and e["meta"].get("kind") == kind)
+
+
+BAD_VERDICTS = ("mistake", "blunder")
+_ALT_RE = re.compile(r"\(Δ=-?\d+, (\w+)\)")
+
+
+def alt_verdict(entry: dict) -> str:
+    """[Blunder-AltMove] 条目里 Stockfish 对模型替代着法的结论（ok / inaccuracy / mistake / blunder）。
+    新条目记在 meta 里，旧条目只写在文本中，从文本解析。"""
+    if entry["meta"].get("alt_verdict"):
+        return entry["meta"]["alt_verdict"]
+    m = _ALT_RE.search(entry["text"])
+    return m.group(1) if m else ""
+
+
+def consolidate(store: RAGStore, threshold: float, dry_run: bool = False) -> dict:
+    """整理经验库（离线，tidy_memory.py 调用）：
+    1. 删除被证伪的 blunder 教训：同一个 blunder 的替代着法被 Stockfish 判为 mistake / blunder，
+       说明模型给出的"应对原则"本身就是错的；
+    2. 合并重复教训：同类教训两两相似度 ≥ threshold 的，只留最早的一条，seen 累加，
+       其余的原文存进 meta.variants（见 rag.merge_into）。
+    返回 {"refuted": [...], "merged": [(保留的, 被并入的), ...]}；dry_run 时只报告不改文件。"""
+    entries = store.entries
+    refuted_keys = {(e["meta"].get("time"), e["meta"].get("ply")) for e in entries
+                    if e["meta"].get("kind") == "blunder_alt_eval" and alt_verdict(e) in BAD_VERDICTS}
+    refuted = [e for e in entries if e["meta"].get("kind") == "blunder"
+               and (e["meta"].get("alt_verdict") in BAD_VERDICTS
+                    or (e["meta"].get("time"), e["meta"].get("ply")) in refuted_keys)]
+    gone = {id(e) for e in refuted}
+
+    merged: list[tuple[dict, dict]] = []
+    kept: list[tuple[dict, np.ndarray]] = []  # (保留的条目, 单位向量)
+    for e in entries:
+        if id(e) in gone or not is_lesson(e):
+            continue
+        v = np.array(e["emb"], dtype=np.float32)
+        v /= np.linalg.norm(v) + 1e-9
+        target = next((k for k, kv in kept if kv.shape == v.shape and k["meta"].get("kind") == e["meta"].get("kind")
+                       and float(kv @ v) >= threshold), None)
+        if target is None:
+            kept.append((e, v))
+        else:
+            merged.append((target, e))
+            gone.add(id(e))
+    report = {"refuted": refuted, "merged": merged}
+    if dry_run:
+        return report
+    for keep, dup in merged:
+        merge_into(keep, dup["text"], dup["meta"])
+    if gone:
+        store.remove(lambda e: id(e) in gone)
+    else:
+        store.save()
+    return report
 
 
 def recall_experience(board: chess.Board) -> list[dict]:
