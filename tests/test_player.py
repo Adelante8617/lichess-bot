@@ -40,11 +40,13 @@ class FakeClient:
     """按提示词种类返回预设回答；self_check_replies 依次用于每轮自检。"""
 
     def __init__(self, decision: dict, self_check_replies: list[dict], complexity="medium",
-                 guard_replies: list[dict] | None = None, pick_replies: list[dict] | None = None):
+                 guard_replies: list[dict] | None = None, pick_replies: list[dict] | None = None,
+                 fork_replies: list[dict] | None = None):
         self.decision = decision
         self.pick_replies = list(pick_replies or [])
         self.self_check_replies = list(self_check_replies)
         self.guard_replies = list(guard_replies or [])
+        self.fork_replies = list(fork_replies or [])
         self.complexity = complexity
         self.prompts: list[str] = []
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
@@ -55,6 +57,8 @@ class FakeClient:
         self.prompts.append(last)
         if "只判断当前局面的复杂度" in last:
             return _msg(json.dumps({"complexity": self.complexity, "reason": "测试"}, ensure_ascii=False))
+        if "双攻指同一个子一步之内同时打到" in last:
+            return _msg(json.dumps(self.fork_replies.pop(0), ensure_ascii=False))
         if "程序做了一个简单的吃子交换模拟" in last:
             return _msg(json.dumps(self.guard_replies.pop(0), ensure_ascii=False))
         if "只在这份名单里选一个" in last:
@@ -465,6 +469,105 @@ class ArchiveTest(unittest.TestCase):
         self.assertEqual(rows[0]["reasoning"], "测试思考内容")
 
 
+# 日志 20261012_000335 的 ply 32：黑 d5 兵无根，白 Nf4 的 Ne6 将同时打黑后 d8 与车 f8。c6 守住 d5 却挡不住
+PLY32 = "r2q1rk1/2pnb1pp/p7/1p1p4/P4N2/1Q6/1PP2PPP/R1B2RK1 b - - 0 16"
+
+
+class ForkGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.board = chess.Board(PLY32)
+        self.legal = list(player.legal_san_map(self.board))
+
+    def run_guard(self, first, replies, candidates=("c6",)):
+        llm._client = FakeClient({}, [], fork_replies=replies)
+        mv, records = hooks.fork_guard(self.board, [], self.board.parse_san(first), self.legal, list(candidates))
+        return self.board.san(mv), records, llm._client
+
+    def test_double_attack_after_move_is_detected(self):
+        for san, forked in (("c6", True), ("Qe8", False), ("Rf7", False), ("Nc5", False)):
+            mv = self.board.parse_san(san)
+            self.assertEqual(bool(guard.allowed_double_attacks(self.board, mv)[1]), forked, san)
+
+    def test_safe_moves_exclude_forks_and_hanging_moves(self):
+        safe = {self.board.san(m) for m in guard.fork_safe_moves(self.board, 2)}
+        self.assertTrue({"Qe8", "Rf7"} <= safe)
+        self.assertFalse({"c6", "Rxf4", "Bg5"} & safe)  # c6 被捉双，Rxf4 被象吃回净亏
+
+    def test_change_to_safe_move(self):
+        san, records, client = self.run_guard("c6", [change("Qe8")])
+        self.assertEqual(san, "Qe8")
+        self.assertIn("Ne6（同时攻击 后 d8、车 f8）", client.prompts[0])
+        self.assertIn("Qe8", client.prompts[0])  # 名单
+        self.assertEqual(records[0]["outcome"], "changed")
+
+    def test_keep_needs_a_concrete_reason(self):
+        san, records, _ = self.run_guard("c6", [{"verdict": "keep", "move": "c6", "reason": ""},
+                                                {"verdict": "keep", "move": "c6", "reason": "Ne6 后 Qe8 反将"}])
+        self.assertEqual(san, "c6")
+        self.assertEqual(records[-1]["outcome"], "kept")
+
+    def test_unresolved_falls_back_to_safe_candidate(self):
+        bogus = {"verdict": "keep", "move": "c6", "reason": ""}
+        san, records, _ = self.run_guard("c6", [bogus, bogus], candidates=("Nf6", "Rf7"))
+        self.assertEqual(san, "Rf7")
+        self.assertEqual(records[-1]["outcome"], "fallback")
+
+    def test_no_call_without_double_attack(self):
+        san, records, client = self.run_guard("Qe8", [])
+        self.assertEqual((san, records, client.prompts), ("Qe8", [], []))
+
+    def test_silent_when_no_move_helps(self):
+        # 开局双方都没有双攻可言；人为让名单为空：所有着法都被判有双攻时不介入
+        original = guard.fork_safe_moves
+        hooks.fork_safe_moves = lambda b, m: []
+        try:
+            san, records, client = self.run_guard("c6", [])
+        finally:
+            hooks.fork_safe_moves = original
+        self.assertEqual((san, client.prompts), ("c6", []))
+
+    def test_pipeline_rechecks_fork_after_self_check_change(self):
+        llm._client = FakeClient({}, [change("c6")], fork_replies=[change("Qe8")])
+        ctx = hooks.MoveContext(board=self.board, messages=[], legal_sans=self.legal, candidates=[],
+                                complexity="medium", check_levels=None, levels=None, max_tokens=None)
+        mv, recs = hooks.run_pre_move(ctx, self.board.parse_san("Rf7"))
+        self.assertEqual(self.board.san(mv), "Qe8")  # 自检把 Rf7 改成 c6，捉双守卫再把 c6 改走
+        self.assertIn("fork_guard", recs)
+
+
+class ForkAwareFlowTest(unittest.TestCase):
+    def test_complexity_raised_when_opponent_has_double_attack(self):
+        board = chess.Board(PLY32)
+        decision = {"strategy": "x", "think": "x", "pv": ["Qe8"], "move": "Qe8"}
+        llm._client = FakeClient(decision, [keep("Qe8")], complexity="medium")
+        _, _, _, obs = player.get_llm_move(board, 32, None, None)
+        self.assertEqual(obs["complexity"], "complex")
+        self.assertIn("双攻", obs["complexity_reason"])
+
+    def test_stage_section_lists_fork_safe_moves(self):
+        board = chess.Board(PLY32)
+        client = FakeClient({"think": "x", "pv": ["Qe8"], "move": "Qe8"}, [keep("Qe8")])
+        stage_reply = {"urgent": "d5", "strategy": "守 d5", "candidates": [{"move": "c6"}, {"move": "Nf6"}]}
+        original = client._create
+
+        def create(**kw):
+            if "先不要选着" in kw["messages"][-1]["content"]:
+                client.prompts.append(kw["messages"][-1]["content"])
+                return _msg(json.dumps(stage_reply, ensure_ascii=False))
+            return original(**kw)
+
+        client.chat.completions.create = create
+        llm._client = client
+        player.STRATEGY_STAGE = True
+        try:
+            player.get_llm_move(board, 32, None, None)
+        finally:
+            player.STRATEGY_STAGE = False
+        decision_prompt = next(p for p in client.prompts if "第一阶段已定下的结论" in p)
+        self.assertIn("对方的双攻", decision_prompt)
+        self.assertIn("Qe8", decision_prompt.split("对方的双攻")[1])
+
+
 class HookPipelineTest(unittest.TestCase):
     """run_pre_move 的调度：recheck 守卫在后面的 hook 改着后重跑，final hook 改着不触发重跑。"""
 
@@ -617,6 +720,8 @@ class TruncateSalvageTest(unittest.TestCase):
         self.assertIn("倾向 d4", retry)
         self.assertIn("可能有错", retry)
         self.assertIn("对照上面的棋盘核实", retry)
+        self.assertIn("【未解决】", retry)  # 未解决的威胁（如对方双攻）不能只靠修一个小问题绕过去
+        self.assertIn("【未解决】", calls[1]["messages"][-1]["content"])  # 整理要点时要求单独标出
         self.assertNotIn("x" * 100, retry)  # 不再贴原始末尾
         self.assertNotIn("Qxh7", retry)  # 原文没出现过的着法不给下棋模型
         self.assertIn("[被截断思考的要点整理]", msg.reasoning_content)

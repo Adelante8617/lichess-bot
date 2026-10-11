@@ -89,23 +89,50 @@ def double_attacks(board: chess.Board) -> list[tuple[chess.Move, list[int]]]:
     return out
 
 
+def format_double_attacks(board: chess.Board, items: list[tuple[chess.Move, list[int]]]) -> str:
+    """double_attacks 的结果写成 "Ne6（同时攻击 后 d8、车 f8）；..."，SAN 以 board（走子前的局面）为准。"""
+    return "；".join(f"{display_san(board, mv)}（同时攻击 "
+                    + "、".join(f"{PIECE_ZH[board.piece_type_at(t)]} {chess.square_name(t)}" for t in targets)
+                    + "）" for mv, targets in items)
+
+
+def opp_double_attacks(board: chess.Board) -> tuple[chess.Board, list[tuple[chess.Move, list[int]]]]:
+    """假设我方空走一步，对方一步可形成的双攻：(对方走子前的局面, 双攻列表)。被将军时空着不合法，返回空列表。"""
+    if board.is_check():
+        return board, []
+    opp_board = _passed(board)
+    return opp_board, double_attacks(opp_board)
+
+
 def double_attack_text(board: chess.Board) -> str:
     """双方一步可形成的双攻，写成给模型看的事实；都没有返回空字符串。
     对方那一侧按"假设我方空走一步"计算，被将军时空着不合法，只列我方。"""
-    def fmt(b: chess.Board, items) -> str:
-        return "；".join(f"{display_san(b, mv)}（同时攻击 "
-                        + "、".join(f"{PIECE_ZH[b.piece_type_at(t)]} {chess.square_name(t)}" for t in targets)
-                        + "）" for mv, targets in items)
     lines = []
     mine = double_attacks(board)
     if mine:
-        lines.append(f"- 我方一步可形成的双攻：{fmt(board, mine)}")
-    if not board.is_check():
-        opp_board = _passed(board)
-        theirs = double_attacks(opp_board)
-        if theirs:
-            lines.append(f"- 对方下一步可形成的双攻（假设我方这步不管）：{fmt(opp_board, theirs)}")
+        lines.append(f"- 我方一步可形成的双攻：{format_double_attacks(board, mine)}")
+    opp_board, theirs = opp_double_attacks(board)
+    if theirs:
+        lines.append(f"- 对方下一步可形成的双攻（假设我方这步不管）：{format_double_attacks(opp_board, theirs)}")
     return "\n".join(lines)
+
+
+def allowed_double_attacks(board: chess.Board, move: chess.Move) -> tuple[chess.Board, list]:
+    """走 move 之后，对方一步可形成的双攻：(走完后的局面, 双攻列表)。"""
+    after = board.copy(stack=False)
+    after.push(move)
+    return after, ([] if after.is_game_over() else double_attacks(after))
+
+
+def fork_text(board: chess.Board, move: chess.Move, after: chess.Board, forks: list) -> str:
+    """走 move 之后对方双攻的事实描述（after 为走完后的局面）。"""
+    return f"走 {display_san(board, move)} 之后，对方一步可形成的双攻：{format_double_attacks(after, forks)}。"
+
+
+def fork_safe_moves(board: chess.Board, min_loss: int) -> list[chess.Move]:
+    """全部合法着法里，走完后对方没有双攻、同一格吃子交换也不会让我方净亏 ≥ min_loss 的那些。"""
+    return [m for m in board.legal_moves
+            if not allowed_double_attacks(board, m)[1] and material_risk(board, m)["loss"] < min_loss]
 
 
 def material_risk(board: chess.Board, move: chess.Move) -> dict:

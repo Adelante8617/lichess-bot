@@ -1,7 +1,7 @@
 """落子前 hook：模型选出着法后、真正落子前依次执行的检查（自检、丢子守卫、将杀守卫）。
 
 每个 hook 接收当前着法，返回 (最终着法, 本 hook 的记录)，可以放行、要求模型改选或直接替换。
-执行顺序和开关都在 PRE_MOVE_HOOKS 里登记；以后加新守卫（捉双、牵制……）只需写一个函数并登记：
+执行顺序和开关都在 PRE_MOVE_HOOKS 里登记；以后加新守卫（牵制……）只需写一个函数并登记：
 - recheck：规则类守卫。后面的 hook 改了着法时，新着法要再过一遍它（自检改出来的着法同样要过丢子守卫）。
 - final：最后的裁决。它改出来的着法不再触发 recheck（被一步杀压过一切）。
 """
@@ -13,12 +13,13 @@ import chess
 from . import board_view
 from .archive import log_reasoning
 from .boardtext import COLOR_ZH, display_san, parse_model_move, render_board
-from .config import (BOARD_RELATIONS, HANG_GUARD, HANG_GUARD_MIN, HANG_GUARD_POSITIONAL, HANG_GUARD_ROUNDS,
-                     MATE_GUARD, MATE_GUARD_ROUNDS, SELF_CHECK_ROUNDS)
-from .guard import allows_mate, material_risk, risk_text, verify_line
+from .config import (BOARD_RELATIONS, FORK_GUARD, FORK_GUARD_ROUNDS, HANG_GUARD, HANG_GUARD_MIN,
+                     HANG_GUARD_POSITIONAL, HANG_GUARD_ROUNDS, MATE_GUARD, MATE_GUARD_ROUNDS, SELF_CHECK_ROUNDS)
+from .guard import (allowed_double_attacks, allows_mate, fork_safe_moves, fork_text, material_risk, risk_text,
+                    verify_line)
 from .live import live
 from .llm import extract_json, llm_call, reasoning_of
-from .prompts import hang_guard_pick_prompt, hang_guard_prompt, mate_guard_prompt, self_check_prompt
+from .prompts import fork_guard_prompt, hang_guard_pick_prompt, hang_guard_prompt, mate_guard_prompt, self_check_prompt
 
 
 def self_check(board: chess.Board, messages: list, move: chess.Move,
@@ -200,6 +201,77 @@ def _guard_fallback(board: chess.Board, messages: list, current: chess.Move, can
                               f"（净亏 {loss[mv]}，{display_san(board, current)} 净亏 {loss[current]}）")
 
 
+def fork_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans: list[str],
+               candidates: list[str], levels: list[str] | None = None,
+               max_tokens: int | None = None) -> tuple[chess.Move, list[dict]]:
+    """捉双守卫：走完 move 后对方一步仍能形成双攻时，把事实和"走完没有双攻、也不直接丢子"的着法名单交给模型。
+    模型可改选；也可坚持，但 reason 里必须写出具体应对（不写等于没回答，进入下一轮）。改选的着法同样要查，
+    最多 FORK_GUARD_ROUNDS 轮。仍未解决时改用候选里不被捉双的着法，没有就保持当前着法。
+    所有合法着法都挡不住双攻（名单为空）时守卫不介入——没有可改选的东西，提醒只会干扰。"""
+    records: list[dict] = []
+    current = move
+    rejected: dict[chess.Move, str] = {}
+    safe: list[chess.Move] | None = None
+    for rnd in range(1, FORK_GUARD_ROUNDS + 1):
+        after, forks = allowed_double_attacks(board, current)
+        if not forks:
+            return current, records
+        if safe is None:
+            safe = fork_safe_moves(board, HANG_GUARD_MIN)
+        if not safe:
+            print(f"[FORK-GUARD] {display_san(board, current)} 后对方有双攻，但没有能挡住它的着法，不介入")
+            return current, records
+        san = display_san(board, current)
+        fact = fork_text(board, current, after, forks)
+        print(f"[FORK-GUARD round={rnd}] {fact}")
+        live.stage(f"捉双守卫：复查 {san}")
+        rejected_view = {display_san(board, m): r for m, r in rejected.items()}
+        prompt = fork_guard_prompt(san, fact, [display_san(board, m) for m in safe], rejected_view, legal_sans)
+        try:
+            msg, _ = llm_call(messages + [{"role": "user", "content": prompt}], levels=levels,
+                              max_tokens=max_tokens)
+        except Exception as e:
+            print(f"[FORK-GUARD] LLM failed: {e}")
+            break
+        content = (msg.content or "").strip()
+        print(f"[FORK-GUARD reply round={rnd}] {content}")
+        log_reasoning(f"FORK-GUARD round={rnd}", reasoning_of(msg))
+        obj = extract_json(content) or {}
+        rec = {"round": rnd, "checked": san, "checked_uci": current.uci(), "fact": fact,
+               **{k: str(obj.get(k, "")).strip() for k in ("verdict", "move", "reason")},
+               "reasoning": reasoning_of(msg)}
+        records.append(rec)
+        if rec["verdict"].lower() == "keep":
+            if rec["reason"]:
+                rec["outcome"], rec["note"] = "kept", f"保持 {san}，说明的应对：{rec['reason']}"
+                print(f"[FORK-GUARD] {rec['note']}")
+                return current, records
+            continue
+        new = parse_model_move(board, rec["move"])
+        if new is None or new == current or new in rejected:
+            rec["note"] = f"改选的着法无效或已放弃过：{rec['move']!r}"
+            print(f"[FORK-GUARD] {rec['note']}")
+            break
+        rejected[current] = fact
+        rec["outcome"], rec["changed_to"] = "changed", display_san(board, new)
+        print(f"[FORK-GUARD] 改选 {san} -> {rec['changed_to']}")
+        current = new
+    if not allowed_double_attacks(board, current)[1]:
+        return current, records
+    for text in candidates:
+        mv = parse_model_move(board, text)
+        if mv is not None and mv in safe and mv not in rejected:
+            note = f"复查后仍会被捉双，改用候选里不被捉双的 {display_san(board, mv)}"
+            print(f"[FORK-GUARD] {note}")
+            records.append({"round": len(records) + 1, "checked": display_san(board, current),
+                            "outcome": "fallback", "note": note, "changed_to": display_san(board, mv)})
+            return mv, records
+    records.append({"round": len(records) + 1, "checked": display_san(board, current), "outcome": "unresolved",
+                    "note": "复查后仍会被捉双，候选里没有不被捉双的着法，保持当前着法"})
+    print(f"[FORK-GUARD] {records[-1]['note']}")
+    return current, records
+
+
 def mate_guard(board: chess.Board, messages: list, move: chess.Move, legal_sans: list[str],
                candidates: list[str], levels: list[str] | None = None,
                max_tokens: int | None = None) -> tuple[chess.Move, list[dict]]:
@@ -283,6 +355,10 @@ class Hook:
 PRE_MOVE_HOOKS = [
     Hook("hang_guard", "guard", lambda ctx: HANG_GUARD,
          lambda ctx, mv: hang_guard(ctx.board, ctx.messages, mv, ctx.legal_sans, ctx.candidates,
+                                    levels=ctx.check_levels, max_tokens=ctx.max_tokens),
+         recheck=True),
+    Hook("fork_guard", "fork_guard", lambda ctx: FORK_GUARD,
+         lambda ctx, mv: fork_guard(ctx.board, ctx.messages, mv, ctx.legal_sans, ctx.candidates,
                                     levels=ctx.check_levels, max_tokens=ctx.max_tokens),
          recheck=True),
     Hook("self_check", "self_check", lambda ctx: SELF_CHECK_ROUNDS > 0 and not ctx.fast,

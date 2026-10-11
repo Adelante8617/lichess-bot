@@ -16,7 +16,8 @@ from .config import (ANALYSIS_BOARD, BOARD_RELATIONS, BOOK_ENABLED, COMPLEXITY_C
                      MATERIAL_LEAD_EFFORT, MATERIAL_LEAD_SKIP, MATE_GUARD, OPENING_EFFORT, OPENING_FAST_MOVES,
                      PLAN_MEMORY, PV_FOLLOW_EFFORT, PV_MEMORY, SELF_CHECK_EFFORT, STRATEGY_STAGE,
                      STRATEGY_STAGE_MAX_TOKENS, TOOL_ROUNDS)
-from .guard import allows_mate, double_attack_text, mate_in_one, mate_threat, material_risk, risk_text
+from .guard import (allows_mate, double_attack_text, fork_safe_moves, format_double_attacks, mate_in_one,
+                    mate_threat, material_risk, opp_double_attacks, risk_text)
 from .hooks import MoveContext, run_pre_move
 from .live import live
 from .llm import cap_ladder, extract_json, llm_call, reasoning_of, think_ladder
@@ -253,6 +254,9 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
             return hit["uci"], note, "", obs
         print(f"[BOOK] 局面在谱里（{hit['san']}，确认 {hit['n']} 次），抽到 {roll:.2f} ≥ {prob:.2f}，本步重新推理")
 
+    opp_forks = opp_double_attacks(board)
+    opp_forks = opp_forks if opp_forks[1] else None  # (对方走子前的局面, 双攻列表)
+
     # 我方 / 对方 颜色字符串
     my_color_str = COLOR_ZH[board.turn] + ("(WHITE)" if board.turn == chess.WHITE else "(BLACK)")
     white_pieces, black_pieces = piece_lists(board)
@@ -294,6 +298,10 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
         print(f"[COMPLEXITY] {complexity_reason} -> effort={MATERIAL_LEAD_EFFORT}, max_tokens={max_tokens}")
     elif COMPLEXITY_CHECK:
         complexity, complexity_reason = classify_complexity(board, last_section, legal_sans, opp_threat)
+        if opp_forks and complexity != "complex":
+            # 对方一步能形成双攻：要同时挡住它和处理别的问题，不是 simple / medium 的算力能稳妥解决的
+            print(f"[COMPLEXITY] 对方有一步双攻（{format_double_attacks(*opp_forks)}），{complexity} 升为 complex")
+            complexity, complexity_reason = "complex", f"对方一步可形成双攻；{complexity_reason}"
         start, max_tokens = COMPLEXITY_PROFILE[complexity]
         ladder = think_ladder(start)
         print(f"[COMPLEXITY] {complexity}（{complexity_reason}）-> effort={start}, max_tokens={max_tokens}")
@@ -338,8 +346,9 @@ def get_llm_move(board: chess.Board, ply: int, prev_board: chess.Board | None,
     stage = strategy_stage(board, messages) if STRATEGY_STAGE and not fast and not following else None
     if stage:
         # 附在 user 提示末尾（而不是新增消息），非法着法重试时保留的 messages[:2] 里也有它
+        safe_sans = [display_san(board, m) for m in fork_safe_moves(board, HANG_GUARD_MIN)] if opp_forks else []
         messages[1]["content"] += strategy_stage_section(stage["urgent"], stage["strategy"],
-                                                         stage["candidates"])
+                                                         stage["candidates"], fork_safe=safe_sans)
 
     think, opp_intent, reasoning = "", "", ""
     obs: dict = {}

@@ -119,6 +119,11 @@ HANG_GUARD_POSITIONAL = int(os.getenv("HANG_GUARD_POSITIONAL", "2"))
 # 同时：任一方存在一步杀时不背谱、不进开局快速模式；对方有一步杀威胁时在 prompt 里提醒一句（同样不给着法）
 MATE_GUARD = os.getenv("MATE_GUARD", "1") == "1"
 MATE_GUARD_ROUNDS = int(os.getenv("MATE_GUARD_ROUNDS", "2"))
+# 捉双守卫：走完某步后对方一步仍能形成双攻（同一个子同时打到两个能净赚的目标）时，把事实和"走完后对方没有双攻、
+# 也不直接丢子"的着法名单交给模型复查；模型可改选，或在 reason 里说明手上的具体应对（反将、吃掉攻击子、反击）后坚持。
+# 最多 FORK_GUARD_ROUNDS 轮，改选的着法同样要查，仍未解决时改用候选里不被捉双的着法
+FORK_GUARD = os.getenv("FORK_GUARD", "1") == "1"
+FORK_GUARD_ROUNDS = int(os.getenv("FORK_GUARD_ROUNDS", "2"))
 # 守卫的赛后统计（Stockfish 评估每次触发时的原着法与最终着法），逐局追加
 GUARD_STATS_PATH = os.getenv("GUARD_STATS_PATH", os.path.join("data", "guard_stats.jsonl"))
 GUARD_OK_DELTA = int(os.getenv("GUARD_OK_DELTA", "50"))   # 着法损失 < 该值（cp）算"其实没问题"

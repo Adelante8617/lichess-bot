@@ -300,6 +300,7 @@ STRATEGY_STAGE_PROMPT = """先不要选着，也不要计算变化。只完成�
 1. 紧急情况：直接威胁与立即机会（看对方上一步、被攻击且保护不足的子、被对方低价值子攻击的我方高价值子、能白吃的子、能以小换大的吃子、将军）。
 2. 战略方针：根据子力分值、王的安全、兵形、子力活跃度，定下接下来 3-5 步的方针。
 3. 候选：最多 3 个，只能来自第 1 步的应对 / 机会或第 2 步的方针，逐字取自合法走法列表。
+   提示里若列出了对方一步可形成的双攻，它属于第 1 步的直接威胁，候选里至少要有一个能防住它的着法。
 
 严格输出 JSON（不要 markdown）：
 {"opp_intent": "≤40 字", "urgent": "≤60 字，没有写 无", "strategy": "≤60 字",
@@ -354,6 +355,34 @@ def hang_guard_pick_prompt(rejected: dict[str, str], safe_sans: list[str]) -> st
 {{"move": "名单里的一个着法（SAN）", "reason": "≤80 字"}}"""
 
 
+def fork_guard_prompt(san: str, fact: str, safe_sans: list[str], rejected: dict[str, str],
+                      legal_sans: list[str]) -> str:
+    """捉双守卫：走完 san 之后对方一步仍能形成双攻。只陈述事实和程序筛出的"没有双攻且不直接丢子"的着法名单，
+    不替模型排序；允许坚持，但必须写出对方双攻之后自己的具体应对。"""
+    rejected_section = ""
+    if rejected:
+        lines = "\n".join(f"- {m}：{r}" for m, r in rejected.items())
+        rejected_section = f"\n你前面已经放弃的着法（走完对方同样有双攻）：\n{lines}\n"
+    safe = ", ".join(safe_sans)
+    return f"""落子前的一次补充核对：程序按规则检查，{fact}
+双攻指同一个子一步之内同时打到两个能净赚的目标（王算一个，即将军），对方走完后你通常只能救一个。
+{rejected_section}
+程序筛了全部合法着法，走完之后对方没有双攻、同一格吃子交换也不会让你净亏 2 分以上的有这些：
+{safe}
+（名单只排除了"对方一步双攻"和直接丢子，不代表名单里的着法就好，也没有排序；你的候选不在名单里时，
+名单只是提醒你：防住这个双攻是这一步必须解决的问题之一。）
+
+两种结论都是正常的：
+- 改选：选一个能同时处理你原本关心的问题（如被攻击的兵、你的方针）、又不留下双攻的着法，可以不限于名单；
+- 坚持 {san}：必须在 reason 里写出对方走完双攻之后你的具体应对（如反将、直接吃掉攻击子、更大的反击），
+  不能只写"问题不大"。
+
+合法走法：{", ".join(legal_sans)}
+
+严格输出 JSON（不要 markdown）：
+{{"verdict": "keep 或 change", "move": "keep 时填 {san}；change 时填新着法（SAN）", "reason": "≤100 字"}}"""
+
+
 def mate_guard_prompt(san: str, legal_sans: list[str], rejected: list[str]) -> str:
     """将杀守卫：程序查到走完 san 后对方有一步杀。只告诉存在，不给对方的着法；不允许坚持原着。"""
     rejected_section = (f"\n下面这些着法同样查到会被一步将杀，也不能走：{', '.join(rejected)}\n"
@@ -385,9 +414,17 @@ def book_warning_section(items: list[dict]) -> str:
 如果你仍然选择其中一步，请在 think 里写明这次与当时的不同之处。"""
 
 
-def strategy_stage_section(urgent: str, strategy: str, candidates: list[dict]) -> str:
-    """把第一阶段的结论附到决策 prompt 后面，限定第二阶段只算这些候选。"""
+def strategy_stage_section(urgent: str, strategy: str, candidates: list[dict],
+                           fork_safe: list[str] | None = None) -> str:
+    """把第一阶段的结论附到决策 prompt 后面，限定第二阶段只算这些候选。
+    fork_safe：对方一步可形成双攻时，程序筛出的"走完没有双攻、也不直接丢子"的合法着法（空表示对方没有双攻）。"""
     lines = "\n".join(f"- {c['move']}（{c.get('purpose', '')}）：{c.get('idea', '')}" for c in candidates)
+    fork = ""
+    if fork_safe:
+        fork = ("\n【对方的双攻】上面列了对方一步可形成的双攻，它必须先解决：如果上面的候选没有一个能防住它，"
+                "不要硬在候选里挑，直接补充一个能防住的着法（也要同时照顾被攻击的兵 / 你的方针）。"
+                "程序按规则筛出走完后对方没有双攻、也不直接丢子的合法着法（无排序，仅供参考）："
+                f"{', '.join(fork_safe)}")
     return f"""
 
 ==== 第一阶段已定下的结论（这一步只做第 4、5 步）====
@@ -396,4 +433,4 @@ def strategy_stage_section(urgent: str, strategy: str, candidates: list[dict]) -
 候选：
 {lines}
 只对上面这些候选做针对性计算，然后选一个。不要另找其他着法；只有在计算中发现所有候选都会白丢子时，
-才可以补充一个应对该威胁的着法。JSON 里的 urgent / strategy 沿用上面的结论（计算中发现错误可以修正）。"""
+才可以补充一个应对该威胁的着法。JSON 里的 urgent / strategy 沿用上面的结论（计算中发现错误可以修正）。{fork}"""
