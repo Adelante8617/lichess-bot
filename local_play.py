@@ -143,7 +143,8 @@ def main():
     print(f"\n=== 对局结束：{result}  ({board.ply()} plies) ===")
 
     live.set_status("reviewing" if not args.no_review else "finished", result)
-    pgn_text = bot.build_pgn(uci_list, result)
+    names = ("LLM", opp_label) if my_white else (opp_label, "LLM")
+    pgn_text = bot.build_pgn(uci_list, result, *names)
     os.makedirs("games", exist_ok=True)
     path = os.path.join("games", f"{datetime.now():%Y%m%d_%H%M%S}_local.pgn")
     with open(path, "w", encoding="utf-8") as f:

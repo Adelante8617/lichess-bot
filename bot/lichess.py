@@ -98,6 +98,7 @@ def run_lichess():
         print(f"=== Game started: {game_id} ===")
 
         is_white = None
+        player_names = ("?", "?")
         move_log = []
         snapshots: list = []  # 本局待验证的局面快照
         last_moves_str = None
@@ -115,6 +116,11 @@ def run_lichess():
                     last_moves_str = None  # 重连后会重发 gameFull，允许重新决策当前手
                     white_name = state["white"].get("name", "").lower()
                     is_white = (white_name == my_username)
+                    # PGN 头里的双方名字；Lichess AI 对手没有 name，只有 aiLevel
+                    player_names = tuple(
+                        p.get("name") or p.get("id")
+                        or (f"Stockfish level {p['aiLevel']}" if p.get("aiLevel") else "?")
+                        for p in (state["white"], state["black"]))
                     print(f"I play {'WHITE' if is_white else 'BLACK'}")
                     opp = state["black" if is_white else "white"]
                     live.start_game(game_id, "lichess", "白" if is_white else "黑",
@@ -183,7 +189,7 @@ def run_lichess():
                     else:
                         result = "1/2-1/2"
                     live.set_status("reviewing", result)
-                    pgn_text = build_pgn(uci_list, result)
+                    pgn_text = build_pgn(uci_list, result, *player_names)
                     os.makedirs("games", exist_ok=True)
                     pgn_path = os.path.join(
                         "games",

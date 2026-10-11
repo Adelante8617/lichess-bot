@@ -192,10 +192,12 @@ def san_history(board: chess.Board) -> str:
     return " ".join(parts)
 
 
-def build_pgn(moves_uci: list, result: str) -> str:
+def build_pgn(moves_uci: list, result: str, white: str = "?", black: str = "?") -> str:
     game = chess.pgn.Game()
     game.headers["Event"] = "Lichess LLM Bot"
     game.headers["Date"] = datetime.now().strftime("%Y.%m.%d")
+    game.headers["White"] = white
+    game.headers["Black"] = black
     game.headers["Result"] = result
     node = game
     b = chess.Board()
