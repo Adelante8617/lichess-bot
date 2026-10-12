@@ -84,9 +84,12 @@ TRUNCATE_SUMMARY_MAX_TOKENS = int(os.getenv("TRUNCATE_SUMMARY_MAX_TOKENS", "1024
 TRUNCATE_REASONING_TAIL = int(os.getenv("TRUNCATE_REASONING_TAIL", "4000"))
 # ---- 复杂度分流：每步先用一次不思考的独立调用判断复杂度，再按档位决定思考强度与 max_tokens ----
 COMPLEXITY_CHECK = os.getenv("COMPLEXITY_CHECK", "1") == "1"   # 0 = 关闭，回到 THINK_LADDER 全阶梯
-# 复杂度 → [起始档位, max_tokens]；重试时从起始档位沿 THINK_LADDER 往下降
+# 复杂度 → [起始档位, max_tokens]；重试时从起始档位沿 THINK_LADDER 往下降。
+# max_tokens 含思考过程。10-12 三局的日志统计：medium 的 8192 有 81%（57/70）的步被截断（没截断的思考也有 15k 字 ≈ 5k token，
+# 最长到 8k token），complex 的 32768 有 44% 被截断。被截断就要降档"直接要结论"，质量明显变差，所以把预算放宽到
+# 大多数思考能自然结束；仍然不设每步时间限制。可用 COMPLEXITY_PROFILE 覆盖
 COMPLEXITY_PROFILE = json.loads(os.getenv("COMPLEXITY_PROFILE") or
-                                '{"simple": ["off", 4096], "medium": ["low", 8192], "complex": ["high", 32768]}')
+                                '{"simple": ["off", 4096], "medium": ["low", 16384], "complex": ["high", 49152]}')
 COMPLEXITY_DEFAULT = os.getenv("COMPLEXITY_DEFAULT", "medium")  # 判断失败时使用
 # 我方子力（兵1 马象3 车5 后9）领先 ≥ 该值时跳过复杂度判断，直接用 MATERIAL_LEAD_EFFORT（0 = 关闭）。
 # 默认 12 ≈ 多一个后加一个轻子：领先这么多时稳妥简化就够，少于这个领先仍可能被翻盘，要正常思考

@@ -3,19 +3,24 @@
 这是对局中唯一由程序"算"出的东西，只覆盖最朴素的一类失误：走完之后对方直接吃子就能净赚
 （如象走到被兵控制的格、高价值子吃被保护的低价值子）。捉双、牵制等战术不在此列，仍由模型判断。
 将杀只查一步杀（mate_in_one / allows_mate / mate_threat），只用来告诉模型"存在一步杀"，不提供具体着法。
-算法是标准的静态交换（SEE）：双方轮流用价值最低的子在同一格上吃，任何一方都可以停手；
-用合法着法生成，自动处理牵制、X 光和将军。
+算法是只含吃子的静止搜索：双方轮流吃子（不限于同一格），任何一方都可以随时停手，
+所以对方吃了我一个子之后我方改吃别处更大的子，也会算进去；用合法着法生成，自动处理牵制、X 光和将军。
+单格的静态交换（_exchange）仍用于"哪些子悬着"的判断（en_prise、双攻的目标）。
 
 verify_line 用来核对模型为弃子给出的变化：按规则摆一遍，只报告是否合法、终点子力，不评价局面。
 """
 import re
+from functools import lru_cache
 
 import chess
 
 from .boardtext import COLOR_ZH, PIECE_VALUES, PIECE_ZH, display_san, material_points, parse_model_move
+from .config import HANG_GUARD_MIN
 
 _ORDER_VALUE = {**PIECE_VALUES, chess.KING: 100}  # 只用于"先用哪个子吃"的排序：王最后上
 MAX_LINE_PLIES = 16
+QS_MAX_PLIES = 12      # 吃子搜索最多连续吃几步
+QS_MAX_NODES = 4000    # 一次搜索最多访问的局面数，超过就在当前分数上停手
 
 
 def _value(piece: chess.Piece | None) -> int:
@@ -40,18 +45,52 @@ def _exchange(board: chess.Board, square: int) -> tuple[int, list[str]]:
     return gain - reply, [san] + line
 
 
+def _capture_gain(board: chess.Board, move: chess.Move) -> int:
+    """move 本身吃到 / 升变得到的分数（吃过路兵算 1，升变只算比兵多出的部分）。"""
+    gain = 1 if board.is_en_passant(move) else _value(board.piece_at(move.to_square))
+    if move.promotion:
+        gain += PIECE_VALUES[move.promotion] - 1
+    return gain
+
+
+def _quiesce(board: chess.Board, alpha: int, beta: int, depth: int, nodes: list[int]) -> tuple[int, list[chess.Move]]:
+    """轮到走的一方只用吃子（含升变）能净得多少分，任何时候都可以停手（不会小于 0）：(分数, 最佳吃子序列)。
+    不限于同一格：对方吃了之后，我方可以吃回、也可以改吃别处更大的子（如对方吃我后，我先吃掉他的后）。
+    alpha-beta 剪枝；nodes 是节点计数，超过 QS_MAX_NODES 就在当前分数上停手。"""
+    nodes[0] += 1
+    best, best_line = 0, []
+    if depth == 0 or nodes[0] > QS_MAX_NODES or best >= beta:
+        return best, best_line
+    alpha = max(alpha, best)
+    captures = [m for m in board.legal_moves if board.is_capture(m) or m.promotion]
+    captures.sort(key=lambda m: (-_capture_gain(board, m), _ORDER_VALUE[board.piece_type_at(m.from_square)]))
+    for move in captures:
+        gain = _capture_gain(board, move)
+        board.push(move)
+        reply, reply_line = _quiesce(board, gain - beta, gain - alpha, depth - 1, nodes)
+        board.pop()
+        if gain - reply > best:
+            best, best_line = gain - reply, [move] + reply_line
+            if best >= beta:
+                break
+            alpha = max(alpha, best)
+    return best, best_line
+
+
 def _best_capture(board: chess.Board) -> tuple[int, list[str], int | None]:
-    """轮到走的一方对 对方 所有子（王除外）发起吃子交换，取净得最多的：(净得, 序列, 格)。"""
-    best, best_line, best_sq = 0, [], None
+    """轮到走的一方只靠吃子最多能净得多少分：(净得, 吃子序列 SAN, 第一步吃子的落点格)。
+    对方的应着是"吃回或改吃别处"里对他最好的，不限于同一格，所以对方吃子之后我方有更大的反吃时不算亏。"""
     if board.is_game_over():
-        return best, best_line, best_sq
-    for sq in chess.SquareSet(board.occupied_co[not board.turn]):
-        if board.piece_type_at(sq) == chess.KING:
-            continue
-        gain, line = _exchange(board, sq)
-        if gain > best:
-            best, best_line, best_sq = gain, line, sq
-    return best, best_line, best_sq
+        return 0, [], None
+    work = board.copy(stack=False)
+    gain, moves = _quiesce(work, -1000, 1000, QS_MAX_PLIES, [0])
+    if gain <= 0 or not moves:
+        return 0, [], None
+    line = []
+    for mv in moves:
+        line.append(display_san(work, mv))
+        work.push(mv)
+    return gain, line, moves[0].to_square
 
 
 def _passed(board: chess.Board) -> chess.Board:
@@ -70,10 +109,28 @@ def en_prise(board: chess.Board) -> list[int]:
             for sq in board.pieces(pt, me) if _exchange(opp, sq)[0] > 0]
 
 
+@lru_cache(maxsize=8192)
+def _fork_gain(fen: str) -> int:
+    """fen 是某个双攻着法走完后的局面（轮到被攻击方走）。被攻击方可以走任何一步
+    （逃子、吃掉攻击子、将军、反吃别处），攻击方之后只靠吃子，在最好的应对下仍能净赚多少分。
+    能一步化解（≤ 0）的"双攻"不是真双攻。"""
+    board = chess.Board(fen)
+    best = None
+    for reply in list(board.legal_moves):
+        gain = _capture_gain(board, reply) if board.is_capture(reply) or reply.promotion else 0
+        board.push(reply)
+        won, _ = _quiesce(board, -1000, 1000, QS_MAX_PLIES, [0])
+        board.pop()
+        if best is None or gain - won > best:
+            best = gain - won
+    return -best if best is not None else 0
+
+
 def double_attacks(board: chess.Board) -> list[tuple[chess.Move, list[int]]]:
     """轮到走的一方一步就能形成的双攻：走完后，走动的那个子同时打到对方两个以上"能净赚"的目标
     （王算一个目标，即将军；其余是我方在那格发起吃子交换能净赚的马象车后，兵不算），且走动的子本身不会被对方净赚吃掉。
-    只陈述"同时攻击到了"这个事实，对方能不能带先手解围、反捉，由模型自己算。"""
+    另外要求"化解不了"：对方走任何一步（逃子、吃掉攻击子、将军、反吃别处）之后，我方仅靠吃子仍能净赚 ≥ HANG_GUARD_MIN 分
+    （_fork_gain）；能一步化解的不算。更深的反击（非吃子的威胁、将军连击）不在计算内，仍由模型判断。"""
     out = []
     for mv in board.legal_moves:
         after = board.copy(stack=False)
@@ -84,7 +141,7 @@ def double_attacks(board: chess.Board) -> list[tuple[chess.Move, list[int]]]:
         targets = [sq for sq in chess.SquareSet(after.attacks(mv.to_square)) & after.occupied_co[after.turn]
                    if after.piece_type_at(sq) == chess.KING
                    or (after.piece_type_at(sq) != chess.PAWN and _exchange(mine, sq)[0] > 0)]
-        if len(targets) >= 2:
+        if len(targets) >= 2 and _fork_gain(after.fen()) >= HANG_GUARD_MIN:
             out.append((mv, targets))
     return out
 
@@ -136,8 +193,8 @@ def fork_safe_moves(board: chess.Board, min_loss: int) -> list[chess.Move]:
 
 
 def material_risk(board: chess.Board, move: chess.Move) -> dict:
-    """走 move 之后，对方用一次吃子交换能让我方净亏多少（已扣除 move 本身吃到的子）。
-    返回 {"loss": 净亏分数（≤0 表示不亏）, "line": 对方的最优交换序列, "square": 交换发生的格,
+    """走 move 之后，对方只靠吃子（我方也只靠吃子应对）能让我方净亏多少（已扣除 move 本身吃到的子）。
+    返回 {"loss": 净亏分数（≤0 表示不亏）, "line": 对方的最优吃子序列, "square": 对方第一步吃的格,
     "preexisting": 这个吃子在走 move 之前就已存在（同一个子、同样能净赚），move 没有解决它}。"""
     gained = _value(board.piece_at(move.to_square))
     if board.is_en_passant(move):
@@ -175,8 +232,8 @@ def risk_text(board: chess.Board, move: chess.Move, risk: dict) -> str:
     san = display_san(board, move)
     steps = _line_steps(board, move, risk["line"]) or " ".join(risk["line"])
     pre = (f"这个吃子在走 {san} 之前就已存在，{san} 没有解决它。" if risk.get("preexisting") else "")
-    return (f"走 {san} 之后，对方可以在 {risk['square']} 上吃子：按双方都用价值最低的子在该格轮流吃、"
-            f"吃亏的一方停手来模拟，交换序列为 {steps}，单看这一格的交换，我方净亏 {risk['loss']} 分"
+    return (f"走 {san} 之后，对方可以吃子 {risk['square']}：按双方只用吃子轮流应对、任何一方都可以随时停手来模拟，"
+            f"最佳序列为 {steps}，我方净亏 {risk['loss']} 分"
             f"（兵1 马象3 车5 后9，已算上 {san} 本身吃到的子）。{pre}")
 
 

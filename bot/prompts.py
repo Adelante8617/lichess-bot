@@ -322,7 +322,7 @@ def hang_guard_prompt(san: str, fact: str, legal_sans: list[str], rejected: dict
                   "子力活跃度等），可以不写变化，在 reason 里说明补偿是什么。" if positional_ok else "")
     return f"""落子前的一次补充核对。程序做了一个简单的吃子交换模拟，供你参考：
 {fact}
-这个模拟只看同一格上双方轮流吃子，不考虑将军、捉双、牵制、闪击、升变，也不考虑局面上的补偿，
+这个模拟只看双方轮流吃子（任何一方可随时停手），不考虑非吃子的着法（将军、捉双、牵制、闪击等威胁），也不考虑局面上的补偿，
 所以它只是一条参考信息，不代表这步一定不好。
 {rejected_section}{feedback_section}
 请结合你自己的分析独立判断，下面两种结论都是正常的：
@@ -347,7 +347,7 @@ def hang_guard_pick_prompt(rejected: dict[str, str], safe_sans: list[str]) -> st
 
 程序按规则检查了全部合法着法，走完之后对方没有净赚的吃子交换的只有这些：
 {", ".join(safe_sans)}
-（模拟同样不考虑捉双、牵制、闪击等战术，只排除了直接丢子。）
+（模拟只看吃子，不考虑捉双、牵制、闪击等战术，只排除了直接丢子。）
 
 请只在这份名单里选一个：先想清楚对方此刻的威胁，再选最能应对威胁、最符合你的方针的一步。
 

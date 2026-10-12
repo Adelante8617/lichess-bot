@@ -125,8 +125,10 @@ def board_meta(board: chess.Board) -> str:
     """当前局面的非棋子信息：轮到谁、是否被将军、易位权、吃过路兵、50 步计数。"""
     lines = [f"轮到: {COLOR_ZH[board.turn]}"]
     lines.append("你正被将军，必须应将" if board.is_check() else "当前未被将军")
+    lead = material_lead(board)
     lines.append(f"子力分值（兵1 马象3 车5 后9）：白方 {material_points(board, chess.WHITE)}，"
-                 f"黑方 {material_points(board, chess.BLACK)}")
+                 f"黑方 {material_points(board, chess.BLACK)}；"
+                 + (f"你领先 {lead} 分" if lead > 0 else f"你落后 {-lead} 分" if lead < 0 else "双方相等"))
     for color in (chess.WHITE, chess.BLACK):
         rights = []
         if board.has_kingside_castling_rights(color):
